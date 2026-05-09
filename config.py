@@ -1,5 +1,5 @@
 """
-Configuration — All environment variables and constants.
+Configuration — All environment variables and constants.m
 """
 
 import os

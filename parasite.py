@@ -2,6 +2,7 @@
 Aurora Parasite — Main entry point.
 Self-evolving market organism with tick-level learning.
 Auto-halts when balance cap is reached.
+Polls live balance from Deriv every 30 seconds.
 """
 
 import asyncio
@@ -42,7 +43,6 @@ class AuroraParasite:
         self.total_trades = 0
         self.total_r = 0.0
 
-        # Balance cap — auto-halt when reached (configurable via env var)
         self.balance_cap = float(os.getenv("BALANCE_CAP", "500.0"))
         self.cap_halted = False
 
@@ -102,6 +102,24 @@ class AuroraParasite:
         logger.info(f"Balance Cap: ${self.balance_cap:.2f}")
         return True
 
+    async def _balance_updater(self):
+        """Poll live balance from Deriv every 30 seconds."""
+        await asyncio.sleep(10)  # Wait for connection to stabilize
+        while self.running:
+            try:
+                if self.tick_client.connected and self.tick_client.ws:
+                    resp = await self.tick_client._send({"balance": 1})
+                    if resp.get("balance"):
+                        b = resp["balance"]
+                        if isinstance(b, dict):
+                            self.tick_client._balance = float(b.get("balance", 10000.0))
+                            self.tick_client._currency = b.get("currency", "USD")
+                        else:
+                            self.tick_client._balance = float(b) if b else 10000.0
+            except Exception:
+                pass
+            await asyncio.sleep(30)
+
     async def _process_signal_queue(self):
         logger.info("Signal processing loop started")
         while self.running:
@@ -138,6 +156,7 @@ class AuroraParasite:
 
         await self.start_aggression()
         asyncio.create_task(self.evolution_loop.run())
+        asyncio.create_task(self._balance_updater())
 
         logger.info("AURORA PARASITE IS LIVE")
         logger.info(f"   Instruments: {len(config.INSTRUMENTS)}")
@@ -150,7 +169,7 @@ class AuroraParasite:
             # Auto-halt when balance cap is reached
             if not self.cap_halted and not self.halted:
                 try:
-                    current_balance, _ = self.tick_client.get_balance()
+                    current_balance = self.tick_client._balance
                     if current_balance >= self.balance_cap:
                         self.halt(f"Balance cap reached: ${current_balance:.2f} (cap: ${self.balance_cap:.2f})")
                         self.cap_halted = True
@@ -182,17 +201,11 @@ class AuroraParasite:
             "cross_instrument": self.cross_instrument.get_stats(),
         }
 
-        current_balance = 0
-        try:
-            current_balance, _ = self.tick_client.get_balance()
-        except:
-            pass
-
         return {
             "running": self.running,
             "halted": self.halted,
             "initial_capital": config.INITIAL_CAPITAL,
-            "current_balance": current_balance,
+            "current_balance": self.tick_client._balance,
             "balance_cap": self.balance_cap,
             "cap_halted": self.cap_halted,
             "uptime_seconds": time.time() - self.start_time,

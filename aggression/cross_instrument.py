@@ -89,9 +89,9 @@ class CrossInstrumentArb:
         if abs(z_score) < config.CROSS_INSTRUMENT_STD_THRESHOLD:
             return
 
-        await self._enter_pair(pair, z_score, buffer_a[-1], buffer_b[-1])
+        await self._enter_pair(pair, z_score)
 
-    async def _enter_pair(self, pair: tuple, z_score: float, tick_a, tick_b):
+    async def _enter_pair(self, pair: tuple, z_score: float):
         sym_a, sym_b = pair
         pair_key = f"{sym_a}_{sym_b}"
         trade_id = f"CI_{uuid.uuid4().hex[:8]}"
@@ -105,14 +105,17 @@ class CrossInstrumentArb:
             dir_a = "BUY"
             dir_b = "SELL"
 
-        entry_a = tick_a.bid if dir_a == "SELL" else tick_a.ask
-        entry_b = tick_b.ask if dir_b == "BUY" else tick_b.bid
-
-        order_a = await self.parasite.execution._place_order(sym_a, dir_a, entry_a, risk_amount)
-        order_b = await self.parasite.execution._place_order(sym_b, dir_b, entry_b, risk_amount)
+        order_a = await self.parasite.execution._place_order(sym_a, dir_a, risk_amount)
+        order_b = await self.parasite.execution._place_order(sym_b, dir_b, risk_amount)
 
         if not order_a or not order_b:
             return
+
+        # Get current prices for tracking
+        buffer_a = self.parasite.nervous_system.tick_buffers.get(sym_a)
+        buffer_b = self.parasite.nervous_system.tick_buffers.get(sym_b)
+        entry_a = buffer_a[-1].bid if dir_a == "SELL" else buffer_a[-1].ask if buffer_a else 0
+        entry_b = buffer_b[-1].ask if dir_b == "BUY" else buffer_b[-1].bid if buffer_b else 0
 
         self.active_pairs[pair_key] = {
             "trade_id": trade_id,
@@ -155,7 +158,6 @@ class CrossInstrumentArb:
             tick_a = buffer_a[-1]
             tick_b = buffer_b[-1]
 
-            # Calculate current R for each leg
             exit_a = tick_a.bid if pos["dir_a"] == "BUY" else tick_a.ask
             exit_b = tick_b.ask if pos["dir_b"] == "BUY" else tick_b.bid
 
@@ -169,29 +171,23 @@ class CrossInstrumentArb:
             else:
                 r_b = (pos["entry_b"] - exit_b) / (risk / 0.01) if risk > 0 else 0
 
-            # ASYMMETRIC EXIT: Cut losing leg, let winner run
+            # ASYMMETRIC EXIT
             if not pos["leg_a_closed"] and r_a < -0.5:
                 pos["leg_a_closed"] = True
                 pos["r_a"] = r_a
-                logger.debug(f"Leg A cut: {pos['sym_a']} r={r_a:.2f}")
 
             if not pos["leg_b_closed"] and r_b < -0.5:
                 pos["leg_b_closed"] = True
                 pos["r_b"] = r_b
-                logger.debug(f"Leg B cut: {pos['sym_b']} r={r_b:.2f}")
 
-            # Trail winning legs - lock in profit
             if not pos["leg_a_closed"] and r_a > 1.0:
                 pos["leg_a_closed"] = True
                 pos["r_a"] = r_a
-                logger.debug(f"Leg A win locked: {pos['sym_a']} r={r_a:.2f}")
 
             if not pos["leg_b_closed"] and r_b > 1.0:
                 pos["leg_b_closed"] = True
                 pos["r_b"] = r_b
-                logger.debug(f"Leg B win locked: {pos['sym_b']} r={r_b:.2f}")
 
-            # Both legs closed — exit pair
             if pos["leg_a_closed"] and pos["leg_b_closed"]:
                 await self._exit_pair(pair_key)
                 break
@@ -207,8 +203,7 @@ class CrossInstrumentArb:
         trade_data = {
             "trade_id": f"TRD_{position['trade_id']}",
             "instrument": f"{position['sym_a']}/{position['sym_b']}",
-            "layer": "cross_instrument",
-            "branch_id": "",
+            "layer": "cross_instrument", "branch_id": "",
             "direction": "PAIR",
             "entry_price": (position["entry_a"] + position["entry_b"]) / 2,
             "exit_price": 0,

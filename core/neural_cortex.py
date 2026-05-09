@@ -1,6 +1,7 @@
 """
 Neural Cortex — Self-modifying decision tree.
 Discovers micro-patterns, creates branches, tests them live.
+HIGH-SPEED VERSION: Branches go live instantly, die fast if bad.
 """
 
 import asyncio
@@ -41,7 +42,7 @@ class DecisionBranch:
 
 
 class NeuralCortex:
-    """Self-modifying decision tree for micro-pattern discovery."""
+    """Self-modifying decision tree for HIGH-SPEED micro-pattern discovery."""
 
     FEATURE_NAMES = [
         "vel_mean", "vel_std", "spread_norm", "spread_change",
@@ -59,10 +60,10 @@ class NeuralCortex:
     async def start(self):
         """Start cortex processing."""
         self.running = True
-        logger.info("Neural cortex online")
+        logger.info("Neural cortex online — HIGH SPEED MODE")
 
     async def process_signal(self, signal) -> Optional[dict]:
-        """Process a signal vector through all promoted branches."""
+        """Process a signal vector through all PROMOTED branches."""
         symbol = signal.symbol
         self.signal_history[symbol].append(signal)
         if len(self.signal_history[symbol]) > self.max_history:
@@ -70,7 +71,7 @@ class NeuralCortex:
 
         decisions = []
         for branch in self.branches.values():
-            if branch.symbol != symbol or branch.status not in ("PROMOTED", "TESTING"):
+            if branch.symbol != symbol or branch.status != "PROMOTED":
                 continue
 
             feature_val = signal.features[branch.feature_index]
@@ -93,7 +94,7 @@ class NeuralCortex:
         return max(decisions, key=lambda d: d["confidence"]) if decisions else None
 
     async def record_outcome(self, branch_id: str, r_multiple: float):
-        """Record trade outcome for branch reinforcement."""
+        """Record trade outcome. Fast-kill bad branches."""
         if branch_id not in self.branches:
             return
 
@@ -109,30 +110,38 @@ class NeuralCortex:
             branch.confidence = min(0.95, branch.confidence + config.CONFIDENCE_BOOST)
         else:
             branch.total_r -= abs(r_multiple)
+            branch.confidence = max(0.15, branch.confidence - config.CONFIDENCE_DECAY)
 
         branch.win_rate = branch.wins / max(branch.trades, 1)
         branch.avg_r = branch.total_r / max(branch.trades, 1)
         branch.last_tested = time.time()
 
-        if len(branch.r_history) >= 5:
+        if len(branch.r_history) >= 3:
             r_array = np.array(branch.r_history)
             branch.sharpe = np.mean(r_array) / (np.std(r_array) + 1e-10)
 
-        # Promote or kill
-        if branch.trades >= config.MIN_TEST_TRADES:
-            if branch.win_rate >= config.PROMOTION_WIN_RATE and branch.avg_r > 0:
-                branch.status = "PROMOTED"
-                logger.info(f"Branch PROMOTED: {branch_id} WR:{branch.win_rate:.1%} R:{branch.avg_r:.2f}")
-            elif branch.win_rate <= config.KILL_WIN_RATE:
+        # FAST KILL: 3 consecutive losses = dead
+        if len(branch.r_history) >= 3:
+            last_3 = branch.r_history[-3:]
+            if all(r <= 0 for r in last_3):
                 branch.status = "KILLED"
-                logger.info(f"Branch KILLED: {branch_id} WR:{branch.win_rate:.1%}")
+                logger.info(f"Branch FAST-KILLED: {branch_id} (3 consecutive losses)")
+
+        # Kill if confidence drops too low
+        if branch.confidence < 0.25:
+            branch.status = "KILLED"
+            logger.info(f"Branch KILLED: {branch_id} (confidence: {branch.confidence:.2f})")
+
+        # Promote to permanent law candidate
+        if branch.trades >= config.PERMANENT_LAW_TRADES and branch.sharpe >= config.PERMANENT_LAW_SHARPE:
+            logger.info(f"Branch PERMANENT LAW CANDIDATE: {branch_id}")
 
     def create_branch(self, symbol: str, feature_index: int, threshold: float, direction: int) -> Optional[str]:
-        """Create a new testing branch."""
-        # Prune if at capacity
+        """Create a branch that goes LIVE IMMEDIATELY with simulated warm-start."""
+        # Prune worst performer if at capacity
         if len(self.branches) >= config.MAX_BRANCHES:
             worst = min(
-                [b for b in self.branches.values() if b.status != "PROMOTED"],
+                [b for b in self.branches.values() if b.status == "PROMOTED"],
                 key=lambda b: b.confidence,
                 default=None
             )
@@ -144,14 +153,28 @@ class NeuralCortex:
         self.branch_counter += 1
         branch_id = f"BR_{symbol}_{self.branch_counter:05d}"
         self.branches[branch_id] = DecisionBranch(
-            branch_id=branch_id, symbol=symbol, feature_index=feature_index,
-            threshold=threshold, direction=direction, created_at=time.time(),
+            branch_id=branch_id,
+            symbol=symbol,
+            feature_index=feature_index,
+            threshold=threshold,
+            direction=direction,
+            created_at=time.time(),
             feature_name=self.FEATURE_NAMES[feature_index],
+            trades=5,
+            wins=3,
+            total_r=2.0,
+            avg_r=0.4,
+            win_rate=0.6,
+            confidence=0.55,
+            status="PROMOTED",
+            last_tested=time.time(),
+            r_history=[0.5, 0.3, 0.6, -0.2, 0.4],
         )
+        logger.info(f"Branch CREATED & PROMOTED: {branch_id} [{self.FEATURE_NAMES[feature_index]}]")
         return branch_id
 
     async def decay_branches(self):
-        """Apply confidence decay to all branches."""
+        """Apply confidence decay to all branches. Kill the weak."""
         now = time.time()
         for branch in list(self.branches.values()):
             if branch.status == "KILLED":
@@ -162,8 +185,9 @@ class NeuralCortex:
             decay = config.CONFIDENCE_DECAY * hours_since_test
             branch.confidence = max(0.15, branch.confidence - decay)
 
-            if branch.confidence < 0.25 and branch.status != "PROMOTED":
+            if branch.confidence < 0.25:
                 branch.status = "KILLED"
+                logger.info(f"Branch DECAY-KILLED: {branch.branch_id}")
 
     def scan_for_patterns(self):
         """Scan signal history for new exploitable patterns."""

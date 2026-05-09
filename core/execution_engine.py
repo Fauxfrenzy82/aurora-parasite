@@ -1,6 +1,6 @@
 """
 Execution Engine — Places REAL orders on Deriv using correct Options API.
-Uses proposal → buy two-step process required by Deriv.
+Uses proposal → buy two-step process with rate limiting.
 """
 
 import asyncio
@@ -14,12 +14,14 @@ logger = get_logger("execution")
 
 
 class ExecutionEngine:
-    """Executes REAL trades on Deriv using proposal + buy flow."""
+    """Executes REAL trades on Deriv using proposal + buy flow with rate limiting."""
 
     def __init__(self, parasite):
         self.parasite = parasite
         self.active_positions: Dict[str, dict] = {}
         self._lock = asyncio.Lock()
+        self._last_order_time = 0
+        self._order_cooldown = 1.0  # Minimum 1 second between proposals
 
     async def execute_decision(self, decision: dict, signal) -> bool:
         symbol = decision["symbol"]
@@ -75,40 +77,38 @@ class ExecutionEngine:
     async def _place_order(self, symbol: str, direction: str, amount: float) -> Optional[dict]:
         """
         Place a REAL order on Deriv using the two-step Options API.
-        Tries multiple symbol field formats for compatibility.
+        Uses shortcode from active_symbols for correct instrument format.
+        Includes rate limiting to avoid Deriv API limits.
         """
         try:
+            # Rate limiting — max 1 proposal per second
+            now = time.time()
+            wait = self._order_cooldown - (now - self._last_order_time)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._last_order_time = time.time()
+
             side = "CALL" if direction.upper() == "BUY" else "PUT"
             amount = max(0.35, round(amount, 2))
 
-            # Try different formats for the symbol field
-            formats = [
-                {"shortcode": symbol},
-                {"underlying": symbol},
-                {"symbol": symbol},
-            ]
+            # Get the correct shortcode for this symbol
+            shortcode = self.parasite.tick_client.symbol_map.get(symbol, symbol)
+            logger.debug(f"Using shortcode: {shortcode} for symbol: {symbol}")
 
-            proposal_resp = None
-            for fmt in formats:
-                try:
-                    proposal_resp = await self.parasite.tick_client._send({
-                        "proposal": 1,
-                        "amount": str(amount),
-                        "basis": "stake",
-                        "contract_type": side,
-                        "currency": "USD",
-                        "duration": 1,
-                        "duration_unit": "d",
-                        **fmt
-                    })
-                    if not proposal_resp.get("error"):
-                        break
-                except Exception:
-                    continue
+            # Step 1: Get proposal using shortcode
+            proposal_resp = await self.parasite.tick_client._send({
+                "proposal": 1,
+                "amount": str(amount),
+                "basis": "stake",
+                "contract_type": side,
+                "currency": "USD",
+                "duration": 1,
+                "duration_unit": "d",
+                "shortcode": shortcode
+            })
 
-            if not proposal_resp or proposal_resp.get("error"):
-                err = proposal_resp.get("error", {}) if proposal_resp else {}
-                logger.error(f"All proposal formats failed. Last error: {err}")
+            if proposal_resp.get("error"):
+                logger.error(f"Proposal failed: {proposal_resp['error']}")
                 return None
 
             proposal_id = proposal_resp.get("proposal", {}).get("id", "")

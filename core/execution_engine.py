@@ -74,29 +74,41 @@ class ExecutionEngine:
 
     async def _place_order(self, symbol: str, direction: str, amount: float) -> Optional[dict]:
         """
-        Place a REAL order on Deriv using the two-step Options API:
-        1. Get a proposal (price quote)
-        2. Buy the contract using the proposal ID
+        Place a REAL order on Deriv using the two-step Options API.
+        Tries multiple symbol field formats for compatibility.
         """
         try:
             side = "CALL" if direction.upper() == "BUY" else "PUT"
             amount = max(0.35, round(amount, 2))
 
-            # Step 1: Get proposal
-            logger.debug(f"Requesting proposal: {symbol} {side} ${amount}")
-            proposal_resp = await self.parasite.tick_client._send({
-                "proposal": 1,
-                "amount": str(amount),
-                "basis": "stake",
-                "contract_type": side,
-                "currency": "USD",
-                "duration": 1,
-                "duration_unit": "d",
-                "symbol": symbol
-            })
+            # Try different formats for the symbol field
+            formats = [
+                {"shortcode": symbol},
+                {"underlying": symbol},
+                {"symbol": symbol},
+            ]
 
-            if proposal_resp.get("error"):
-                logger.error(f"Proposal failed: {proposal_resp['error']}")
+            proposal_resp = None
+            for fmt in formats:
+                try:
+                    proposal_resp = await self.parasite.tick_client._send({
+                        "proposal": 1,
+                        "amount": str(amount),
+                        "basis": "stake",
+                        "contract_type": side,
+                        "currency": "USD",
+                        "duration": 1,
+                        "duration_unit": "d",
+                        **fmt
+                    })
+                    if not proposal_resp.get("error"):
+                        break
+                except Exception:
+                    continue
+
+            if not proposal_resp or proposal_resp.get("error"):
+                err = proposal_resp.get("error", {}) if proposal_resp else {}
+                logger.error(f"All proposal formats failed. Last error: {err}")
                 return None
 
             proposal_id = proposal_resp.get("proposal", {}).get("id", "")
@@ -105,7 +117,6 @@ class ExecutionEngine:
                 return None
 
             # Step 2: Buy the contract
-            logger.debug(f"Buying proposal: {proposal_id}")
             buy_resp = await self.parasite.tick_client._send({
                 "buy": proposal_id,
                 "price": str(amount)

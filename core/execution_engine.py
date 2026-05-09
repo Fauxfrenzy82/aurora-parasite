@@ -1,7 +1,6 @@
 """
-Execution Engine — Places REAL orders on Deriv using correct Options API.
-Uses proposal → buy two-step process with rate limiting.
-Retries with shortcode from active_symbols mapping.
+Execution Engine — Simulation mode for strategy testing.
+Uses fake order IDs. All strategy logic runs, but no real orders placed.
 """
 
 import asyncio
@@ -15,14 +14,12 @@ logger = get_logger("execution")
 
 
 class ExecutionEngine:
-    """Executes REAL trades on Deriv using proposal + buy flow with rate limiting."""
+    """Executes simulated trades for strategy validation."""
 
     def __init__(self, parasite):
         self.parasite = parasite
         self.active_positions: Dict[str, dict] = {}
         self._lock = asyncio.Lock()
-        self._last_order_time = 0
-        self._order_cooldown = 1.0
 
     async def execute_decision(self, decision: dict, signal) -> bool:
         symbol = decision["symbol"]
@@ -76,59 +73,8 @@ class ExecutionEngine:
                 return False
 
     async def _place_order(self, symbol: str, direction: str, amount: float) -> Optional[dict]:
-        try:
-            # Rate limiting
-            now = time.time()
-            wait = self._order_cooldown - (now - self._last_order_time)
-            if wait > 0:
-                await asyncio.sleep(wait)
-            self._last_order_time = time.time()
-
-            side = "CALL" if direction.upper() == "BUY" else "PUT"
-            amount = max(0.35, round(amount, 2))
-
-            # Get shortcode from symbol map
-            shortcode = self.parasite.tick_client.symbol_map.get(symbol, symbol)
-
-            # Step 1: Get proposal
-            proposal_resp = await self.parasite.tick_client._send({
-                "proposal": 1,
-                "amount": str(amount),
-                "basis": "stake",
-                "contract_type": side,
-                "currency": "USD",
-                "duration": 1,
-                "duration_unit": "d",
-                "shortcode": shortcode
-            })
-
-            if proposal_resp.get("error"):
-                logger.error(f"Proposal failed for {symbol} ({shortcode}): {proposal_resp['error']}")
-                return None
-
-            proposal_id = proposal_resp.get("proposal", {}).get("id", "")
-            if not proposal_id:
-                logger.error("No proposal ID returned")
-                return None
-
-            # Step 2: Buy
-            buy_resp = await self.parasite.tick_client._send({
-                "buy": proposal_id,
-                "price": str(amount)
-            })
-
-            if buy_resp.get("error"):
-                logger.error(f"Buy failed: {buy_resp['error']}")
-                return None
-
-            buy_info = buy_resp.get("buy", {})
-            order_id = str(buy_info.get("contract_id", int(time.time())))
-            logger.info(f"REAL ORDER PLACED: {symbol} {direction} ${amount} → {order_id}")
-            return {"orderId": order_id}
-
-        except Exception as e:
-            logger.error(f"Order error: {e}")
-            return None
+        """Simulate order placement. Returns fake order ID for testing."""
+        return {"orderId": str(uuid.uuid4().hex[:8])}
 
     async def _monitor_position(self, trade_id: str):
         position = self.active_positions.get(trade_id)

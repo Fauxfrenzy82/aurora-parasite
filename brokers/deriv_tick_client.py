@@ -38,10 +38,9 @@ class DerivTickClient:
         self._req_id = 0
         self._pending: dict = {}
         self._subscriptions: set = set()
-        self.symbol_map: Dict[str, str] = {}  # display_name → shortcode
+        self.symbol_map: Dict[str, str] = {}
 
     async def connect(self, app_id: str, api_token: str) -> bool:
-        """Connect to Deriv and authenticate."""
         self.app_id = app_id
         self.api_token = api_token
 
@@ -54,7 +53,6 @@ class DerivTickClient:
                 self.ws = await websockets.connect(ws_url, ping_interval=self.WS_PING_INTERVAL)
                 self.connected = True
 
-                # Re-subscribe to previously subscribed symbols
                 for symbol in self._subscriptions:
                     msg = {"ticks": symbol, "subscribe": 1}
                     self._req_id += 1
@@ -64,7 +62,6 @@ class DerivTickClient:
                     except:
                         pass
 
-                # Fetch active symbols for correct shortcode mapping
                 await self._fetch_symbol_map()
 
                 self._listen_task = asyncio.create_task(self._listen_loop())
@@ -77,7 +74,6 @@ class DerivTickClient:
                 return False
 
     async def _fetch_symbol_map(self):
-        """Fetch active symbols to map display names to shortcodes."""
         try:
             resp = await self._send({"active_symbols": "brief"})
             symbols = resp.get("active_symbols", [])
@@ -86,7 +82,6 @@ class DerivTickClient:
                 short = s.get("shortcode", "")
                 market = s.get("market", "")
                 if short:
-                    # Map both display name and market name
                     if name:
                         self.symbol_map[name] = short
                     if market:
@@ -96,7 +91,6 @@ class DerivTickClient:
             logger.warning(f"Symbol map fetch failed: {e}")
 
     async def _keepalive(self):
-        """Send periodic pings to keep WebSocket alive."""
         while self.connected:
             try:
                 await asyncio.sleep(self.WS_PING_INTERVAL)
@@ -106,7 +100,6 @@ class DerivTickClient:
                 break
 
     async def _get_otp_url(self) -> Optional[str]:
-        """Get one-time WebSocket URL via REST."""
         headers = {
             "Deriv-App-ID": self.app_id,
             "Authorization": f"Bearer {self.api_token}",
@@ -143,7 +136,6 @@ class DerivTickClient:
         return None
 
     async def subscribe(self, symbol: str, callback: Callable):
-        """Subscribe to tick data for a symbol."""
         if symbol not in self._callbacks:
             self._callbacks[symbol] = []
         self._callbacks[symbol].append(callback)
@@ -155,12 +147,10 @@ class DerivTickClient:
             msg["req_id"] = self._req_id
             try:
                 await self.ws.send(json.dumps(msg))
-                logger.debug(f"Subscribed to {symbol}")
             except Exception as e:
                 logger.error(f"Subscribe error for {symbol}: {e}")
 
     async def _send(self, msg: dict, timeout: float = 15) -> dict:
-        """Send message and await response."""
         if not self.ws or not self.connected:
             raise Exception("Not connected")
         future = asyncio.get_event_loop().create_future()
@@ -171,7 +161,6 @@ class DerivTickClient:
         return await asyncio.wait_for(future, timeout=timeout)
 
     async def _listen_loop(self):
-        """Listen for messages. Auto-reconnect on disconnect with fresh OTP."""
         while True:
             try:
                 if not self.ws:
@@ -198,7 +187,7 @@ class DerivTickClient:
                     except json.JSONDecodeError:
                         pass
             except websockets.exceptions.ConnectionClosed:
-                logger.warning("WebSocket closed — getting fresh OTP and reconnecting...")
+                logger.warning("WebSocket closed — reconnecting...")
             except Exception as e:
                 logger.warning(f"Listen error: {e}. Reconnecting...")
 
@@ -206,7 +195,6 @@ class DerivTickClient:
             self.ws = None
 
             for attempt in range(1, 11):
-                logger.info(f"Reconnect attempt {attempt}/10...")
                 try:
                     if await self.connect(self.app_id, self.api_token):
                         logger.info("Reconnected successfully")
@@ -219,7 +207,6 @@ class DerivTickClient:
                 await asyncio.sleep(60)
 
     async def get_historical_ticks(self, symbol: str, count: int = 5000) -> list:
-        """Fetch historical tick data for priming."""
         try:
             resp = await self._send({
                 "ticks_history": symbol,
@@ -243,7 +230,6 @@ class DerivTickClient:
             return []
 
     async def disconnect(self):
-        """Disconnect from Deriv."""
         self.connected = False
         if self._keepalive_task:
             self._keepalive_task.cancel()
@@ -253,5 +239,4 @@ class DerivTickClient:
             await self.ws.close()
 
     def get_balance(self) -> tuple:
-        """Get cached balance."""
         return self._balance, self._currency

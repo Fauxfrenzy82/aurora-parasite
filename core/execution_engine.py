@@ -1,5 +1,6 @@
 """
-Execution Engine — Places REAL orders on Deriv.
+Execution Engine — Places REAL orders on Deriv using correct Options API.
+Uses proposal → buy two-step process required by Deriv.
 """
 
 import asyncio
@@ -13,7 +14,7 @@ logger = get_logger("execution")
 
 
 class ExecutionEngine:
-    """Executes REAL trades on Deriv."""
+    """Executes REAL trades on Deriv using proposal + buy flow."""
 
     def __init__(self, parasite):
         self.parasite = parasite
@@ -46,8 +47,7 @@ class ExecutionEngine:
 
             trade_id = f"TRD_{uuid.uuid4().hex[:8]}"
             try:
-                # REAL ORDER TO DERIV
-                order_result = await self._place_order(symbol, direction, entry_price, risk_amount)
+                order_result = await self._place_order(symbol, direction, risk_amount)
                 if not order_result:
                     return False
 
@@ -72,28 +72,54 @@ class ExecutionEngine:
                 logger.error(f"Order execution error: {e}")
                 return False
 
-    async def _place_order(self, symbol: str, direction: str, price: float, amount: float) -> Optional[dict]:
-        """Place a REAL order on Deriv."""
+    async def _place_order(self, symbol: str, direction: str, amount: float) -> Optional[dict]:
+        """
+        Place a REAL order on Deriv using the two-step Options API:
+        1. Get a proposal (price quote)
+        2. Buy the contract using the proposal ID
+        """
         try:
             side = "CALL" if direction.upper() == "BUY" else "PUT"
-            amount = max(0.35, round(amount, 2))  # Deriv minimum stake
-            contract = {
-                "buy": 1,
-                "contract_type": side,
-                "symbol": symbol,
-                "duration": "day",
+            amount = max(0.35, round(amount, 2))
+
+            # Step 1: Get proposal
+            logger.debug(f"Requesting proposal: {symbol} {side} ${amount}")
+            proposal_resp = await self.parasite.tick_client._send({
+                "proposal": 1,
+                "amount": str(amount),
                 "basis": "stake",
+                "contract_type": side,
                 "currency": "USD",
-                "amount": str(amount)
-            }
-            resp = await self.parasite.tick_client._send(contract)
-            if resp.get("error"):
-                logger.error(f"Deriv order failed: {resp['error']}")
+                "duration": 1,
+                "duration_unit": "d",
+                "symbol": symbol
+            })
+
+            if proposal_resp.get("error"):
+                logger.error(f"Proposal failed: {proposal_resp['error']}")
                 return None
-            buy_info = resp.get("buy") or {}
+
+            proposal_id = proposal_resp.get("proposal", {}).get("id", "")
+            if not proposal_id:
+                logger.error("No proposal ID returned")
+                return None
+
+            # Step 2: Buy the contract
+            logger.debug(f"Buying proposal: {proposal_id}")
+            buy_resp = await self.parasite.tick_client._send({
+                "buy": proposal_id,
+                "price": str(amount)
+            })
+
+            if buy_resp.get("error"):
+                logger.error(f"Buy failed: {buy_resp['error']}")
+                return None
+
+            buy_info = buy_resp.get("buy", {})
             order_id = str(buy_info.get("contract_id", int(time.time())))
             logger.info(f"REAL ORDER PLACED: {symbol} {direction} ${amount} → {order_id}")
             return {"orderId": order_id}
+
         except Exception as e:
             logger.error(f"Order error: {e}")
             return None
@@ -122,12 +148,10 @@ class ExecutionEngine:
             else:
                 r_multiple = (entry - current_price) / (risk / 0.01) if risk > 0 else 0
 
-            # Cut loss at -0.7R
             if r_multiple < -0.7:
                 await self._close_position(trade_id, current_price)
                 break
 
-            # Take profit at +1.5R
             if r_multiple > 1.5:
                 await self._close_position(trade_id, current_price)
                 break

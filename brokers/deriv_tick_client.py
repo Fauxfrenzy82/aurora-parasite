@@ -1,7 +1,7 @@
 """
 Deriv Tick Client — Raw WebSocket tick stream.
 Handles OTP authentication and subscribes to tick data for all instruments.
-Features keep-alive pings, auto-reconnection, and active symbol mapping.
+Features keep-alive pings and auto-reconnection with fresh OTP.
 """
 
 import asyncio
@@ -17,7 +17,7 @@ logger = get_logger("tick_client")
 
 
 class DerivTickClient:
-    """Raw WebSocket tick client for Deriv API with keep-alive, auto-reconnect, and symbol mapping."""
+    """Raw WebSocket tick client for Deriv API with keep-alive and auto-reconnect."""
 
     REST_API_BASE = "https://api.derivws.com"
     WS_PING_INTERVAL = 20
@@ -38,7 +38,6 @@ class DerivTickClient:
         self._req_id = 0
         self._pending: dict = {}
         self._subscriptions: set = set()
-        self.symbol_map: Dict[str, str] = {}
 
     async def connect(self, app_id: str, api_token: str) -> bool:
         self.app_id = app_id
@@ -62,8 +61,6 @@ class DerivTickClient:
                     except:
                         pass
 
-                await self._fetch_symbol_map()
-
                 self._listen_task = asyncio.create_task(self._listen_loop())
                 self._keepalive_task = asyncio.create_task(self._keepalive())
 
@@ -72,23 +69,6 @@ class DerivTickClient:
             except Exception as e:
                 logger.error(f"Connection failed: {e}")
                 return False
-
-    async def _fetch_symbol_map(self):
-        try:
-            resp = await self._send({"active_symbols": "brief"})
-            symbols = resp.get("active_symbols", [])
-            for s in symbols:
-                name = s.get("display_name", "")
-                short = s.get("shortcode", "")
-                market = s.get("market", "")
-                if short:
-                    if name:
-                        self.symbol_map[name] = short
-                    if market:
-                        self.symbol_map[market] = short
-            logger.info(f"Fetched {len(self.symbol_map)} symbol mappings")
-        except Exception as e:
-            logger.warning(f"Symbol map fetch failed: {e}")
 
     async def _keepalive(self):
         while self.connected:

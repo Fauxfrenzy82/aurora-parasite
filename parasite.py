@@ -40,7 +40,6 @@ class AuroraParasite:
         self.total_trades = 0
         self.total_r = 0.0
 
-        # Core components
         self.tick_client = DerivTickClient()
         self.db = ParasiteDB()
         self.nervous_system = NervousSystem(config.INSTRUMENTS)
@@ -50,71 +49,53 @@ class AuroraParasite:
         self.dynamic_exposure = DynamicExposure()
         self.correlation = CorrelationMatrix()
 
-        # Aggression layers
         self.spread_capture = SpreadCapture(self)
         self.tick_momentum = TickMomentum(self)
         self.fade_engine = FadeEngine(self)
         self.news_scalper = NewsScalper(self)
         self.cross_instrument = CrossInstrumentArb(self)
 
-        # Evolution
         self.evolution_loop = EvolutionLoop(self)
-
-        # Monitoring
         self.monitor_api = MonitorAPI(self)
-
-        # Priming
         self.primer = TickPrimer(self.tick_client, self.nervous_system, self.cortex)
 
     async def initialize(self) -> bool:
-        """Initialize all components."""
         logger.info("=" * 60)
         logger.info("AURORA PARASITE INITIALIZING")
         logger.info("=" * 60)
 
-        # Validate config
         try:
             config.validate()
         except ValueError as e:
             logger.error(f"Config error: {e}")
             return False
 
-        # Connect to Deriv
         if not await self.tick_client.connect(config.DERIV_APP_ID, config.DERIV_API_TOKEN):
             logger.error("Failed to connect to Deriv")
             return False
 
-        # Load permanent laws from memory
         laws = await self.memory.load_laws()
         logger.info(f"Loaded {len(laws)} permanent laws from memory")
 
-        # Start nervous system — begin ingesting ticks
         await self.nervous_system.start(self.tick_client)
-
-        # Start cortex
         await self.cortex.start()
 
-        # Prime with historical data
-        logger.info(f"🧠 Priming cortex with {config.PRIMING_HOURS}h of historical tick data...")
+        logger.info(f"Priming cortex with {config.PRIMING_HOURS}h of historical tick data...")
         branches_created = await self.primer.prime(config.PRIMING_HOURS)
 
-        # Force initial pattern scan if priming created no branches
         if branches_created == 0:
             logger.warning("Priming created no branches — forcing scan on available data")
             self.cortex.scan_for_patterns()
             logger.info(f"Post-scan branches: {len(self.cortex.branches)}")
 
-        # Force dynamic exposure to a reasonable starting level
         self.dynamic_exposure.max_exposure = 0.55
 
-        # Start signal processing loop
         asyncio.create_task(self._process_signal_queue())
 
-        logger.info(f"🦠 Aurora Parasite initialized — {len(self.cortex.branches)} branches ready")
+        logger.info(f"Aurora Parasite initialized — {len(self.cortex.branches)} branches ready")
         return True
 
     async def _process_signal_queue(self):
-        """Continuously process signal vectors from the nervous system."""
         logger.info("Signal processing loop started")
         while self.running:
             try:
@@ -122,16 +103,11 @@ class AuroraParasite:
                     self.nervous_system.signal_queue.get(),
                     timeout=1.0
                 )
-
                 if self.halted:
                     continue
 
-                # Run through cortex for pattern matching
                 decision = await self.cortex.process_signal(signal)
-
                 if decision:
-                    # Route to appropriate execution layer
-                    # The decision contains branch info that tells us which layer to use
                     await self.execution.execute_decision(decision, signal)
 
             except asyncio.TimeoutError:
@@ -140,7 +116,6 @@ class AuroraParasite:
                 logger.error(f"Signal processing error: {e}")
 
     async def start_aggression(self):
-        """Start all aggression layers."""
         logger.info("Starting aggression layers...")
         asyncio.create_task(self.spread_capture.run())
         asyncio.create_task(self.tick_momentum.run())
@@ -150,7 +125,6 @@ class AuroraParasite:
         logger.info("All 5 aggression layers online")
 
     async def run(self):
-        """Main run loop."""
         if not await self.initialize():
             logger.critical("Initialization failed — exiting")
             return
@@ -158,34 +132,29 @@ class AuroraParasite:
         await self.start_aggression()
         asyncio.create_task(self.evolution_loop.run())
 
-        logger.info("🦠 AURORA PARASITE IS LIVE")
+        logger.info("AURORA PARASITE IS LIVE")
         logger.info(f"   Instruments: {len(config.INSTRUMENTS)}")
         logger.info(f"   Branches: {len(self.cortex.branches)}")
-        logger.info(f"   Max Drawdown: {config.MAX_DRAWDOWN_PCT*100}%")
+        logger.info(f"   Max Drawdown: {config.HARD_STOP_DRAWDOWN*100}%")
 
-        # Keep running
         while self.running:
             await asyncio.sleep(1)
 
     async def shutdown(self):
-        """Graceful shutdown."""
         logger.info("Shutting down Aurora Parasite...")
         self.running = False
         await self.tick_client.disconnect()
         logger.info("Shutdown complete")
 
     def halt(self, reason: str = ""):
-        """Emergency halt."""
         self.halted = True
-        logger.critical(f"🛑 EMERGENCY HALT: {reason}")
+        logger.critical(f"EMERGENCY HALT: {reason}")
 
     def resume(self):
-        """Resume trading."""
         self.halted = False
-        logger.info("▶️ Trading resumed")
+        logger.info("Trading resumed")
 
     def get_stats(self) -> dict:
-        """Get system statistics."""
         layers_stats = {
             "spread_capture": self.spread_capture.get_stats(),
             "tick_momentum": self.tick_momentum.get_stats(),
@@ -212,25 +181,20 @@ class AuroraParasite:
         }
 
     async def record_trade(self, trade_data: dict):
-        """Record a trade outcome."""
         self.total_trades += 1
         r = trade_data.get("r_multiple", 0)
         self.total_r += r
 
-        # Save to database
         await self.db.save_trade(trade_data)
 
-        # Update cortex with result
         branch_id = trade_data.get("branch_id", "")
         if branch_id:
             await self.cortex.record_outcome(branch_id, r)
 
 
 async def main():
-    """Entry point."""
     parasite = AuroraParasite()
 
-    # Handle shutdown signals
     loop = asyncio.get_event_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         try:
@@ -238,7 +202,6 @@ async def main():
         except NotImplementedError:
             pass
 
-    # Start API server
     config_uvicorn = uvicorn.Config(
         parasite.monitor_api.app,
         host="0.0.0.0",
@@ -248,7 +211,6 @@ async def main():
     server = uvicorn.Server(config_uvicorn)
     asyncio.create_task(server.serve())
 
-    # Run parasite
     await parasite.run()
 
 

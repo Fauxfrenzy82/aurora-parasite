@@ -1,6 +1,0 @@
-{
-  "buildCommand": "cd parasite-frontend && npm install && npm run build",
-  "outputDirectory": "parasite-frontend/out",
-  "installCommand": "cd parasite-frontend && npm install",
-  "framework": "nextjs"
-}

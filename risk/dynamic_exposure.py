@@ -30,7 +30,6 @@ class DynamicExposure:
 
     def update(self, nervous_system, cortex):
         """Update exposure limits based on current market conditions."""
-        # Calculate aggregate volatility across all instruments
         vol_ratios = []
         for symbol in config.INSTRUMENTS:
             buffer = nervous_system.tick_buffers.get(symbol)
@@ -41,6 +40,7 @@ class DynamicExposure:
                     vol_ratios.append(np.mean(velocities))
 
         if not vol_ratios:
+            # No data yet — keep current limits
             return
 
         avg_velocity = np.mean(vol_ratios)
@@ -58,6 +58,10 @@ class DynamicExposure:
         else:
             self.volatility_regime = "EXTREME"
             self.max_exposure = config.EXTREME_VOL_EXPOSURE
+
+        # Ensure minimum exposure for operation
+        if self.max_exposure < 0.30:
+            self.max_exposure = 0.55
 
     def can_open(self, symbol: str, direction: str) -> bool:
         """Check if a new position can be opened."""

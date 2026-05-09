@@ -1,6 +1,7 @@
 """
 Deriv Tick Client — Raw WebSocket tick stream.
 Handles OTP authentication and subscribes to tick data for all instruments.
+Features keep-alive pings and auto-reconnection with fresh OTP.
 """
 
 import asyncio
@@ -16,7 +17,7 @@ logger = get_logger("tick_client")
 
 
 class DerivTickClient:
-    """Raw WebSocket tick client for Deriv API."""
+    """Raw WebSocket tick client for Deriv API with keep-alive and auto-reconnect."""
 
     REST_API_BASE = "https://api.derivws.com"
     WS_PING_INTERVAL = 20
@@ -29,12 +30,14 @@ class DerivTickClient:
         self.connected = False
         self._callbacks: Dict[str, list] = {}
         self._listen_task = None
+        self._keepalive_task = None
         self._lock = asyncio.Lock()
         self._account_id = ""
         self._balance = 10000.0
         self._currency = "USD"
         self._req_id = 0
         self._pending: dict = {}
+        self._subscriptions: set = set()
 
     async def connect(self, app_id: str, api_token: str) -> bool:
         """Connect to Deriv and authenticate."""
@@ -49,12 +52,35 @@ class DerivTickClient:
 
                 self.ws = await websockets.connect(ws_url, ping_interval=self.WS_PING_INTERVAL)
                 self.connected = True
+                
+                # Re-subscribe to any previously subscribed symbols
+                for symbol in self._subscriptions:
+                    msg = {"ticks": symbol, "subscribe": 1}
+                    self._req_id += 1
+                    msg["req_id"] = self._req_id
+                    try:
+                        await self.ws.send(json.dumps(msg))
+                    except:
+                        pass
+
                 self._listen_task = asyncio.create_task(self._listen_loop())
+                self._keepalive_task = asyncio.create_task(self._keepalive())
+                
                 logger.info("Deriv tick client connected")
                 return True
             except Exception as e:
                 logger.error(f"Connection failed: {e}")
                 return False
+
+    async def _keepalive(self):
+        """Send periodic pings to keep WebSocket alive."""
+        while self.connected:
+            try:
+                await asyncio.sleep(self.WS_PING_INTERVAL)
+                if self.ws and self.connected:
+                    await self.ws.send(json.dumps({"ping": 1}))
+            except Exception:
+                break
 
     async def _get_otp_url(self) -> Optional[str]:
         """Get one-time WebSocket URL via REST."""
@@ -94,10 +120,11 @@ class DerivTickClient:
         return None
 
     async def subscribe(self, symbol: str, callback: Callable):
-        """Subscribe to tick data for a symbol. Fire-and-forget — no response expected."""
+        """Subscribe to tick data for a symbol."""
         if symbol not in self._callbacks:
             self._callbacks[symbol] = []
         self._callbacks[symbol].append(callback)
+        self._subscriptions.add(symbol)
 
         if self.connected and self.ws:
             msg = {"ticks": symbol, "subscribe": 1}
@@ -109,9 +136,9 @@ class DerivTickClient:
             except Exception as e:
                 logger.error(f"Subscribe error for {symbol}: {e}")
 
-    async def _send(self, msg: dict, timeout: float = 10) -> dict:
-        """Send message and await response. Only used for non-streaming requests."""
-        if not self.ws:
+    async def _send(self, msg: dict, timeout: float = 15) -> dict:
+        """Send message and await response."""
+        if not self.ws or not self.connected:
             raise Exception("Not connected")
         future = asyncio.get_event_loop().create_future()
         self._req_id += 1
@@ -121,8 +148,7 @@ class DerivTickClient:
         return await asyncio.wait_for(future, timeout=timeout)
 
     async def _listen_loop(self):
-        """Listen for incoming messages and dispatch to callbacks."""
-        self._pending = {}
+        """Listen for messages. Auto-reconnect on disconnect with fresh OTP."""
         while True:
             try:
                 if not self.ws:
@@ -135,7 +161,6 @@ class DerivTickClient:
                         if req_id and req_id in self._pending:
                             self._pending.pop(req_id).set_result(data)
 
-                        # Dispatch ticks
                         tick = data.get("tick")
                         if tick:
                             symbol = tick.get("symbol", "")
@@ -150,27 +175,26 @@ class DerivTickClient:
                     except json.JSONDecodeError:
                         pass
             except websockets.exceptions.ConnectionClosed:
-                logger.warning("WebSocket closed — reconnecting...")
+                logger.warning("WebSocket closed — getting fresh OTP and reconnecting...")
             except Exception as e:
-                logger.warning(f"Listen error: {e}")
+                logger.warning(f"Listen error: {e}. Reconnecting...")
 
             self.connected = False
             self.ws = None
-            await asyncio.sleep(5)
             
-            # Reconnect and re-subscribe
-            try:
-                if await self.connect(self.app_id, self.api_token):
-                    for symbol in self._callbacks:
-                        msg = {"ticks": symbol, "subscribe": 1}
-                        self._req_id += 1
-                        msg["req_id"] = self._req_id
-                        try:
-                            await self.ws.send(json.dumps(msg))
-                        except:
-                            pass
-            except:
-                await asyncio.sleep(30)
+            # Reconnect with exponential backoff
+            for attempt in range(1, 11):
+                logger.info(f"Reconnect attempt {attempt}/10...")
+                try:
+                    if await self.connect(self.app_id, self.api_token):
+                        logger.info("Reconnected successfully")
+                        break
+                except Exception as e:
+                    logger.warning(f"Attempt {attempt} failed: {e}")
+                await asyncio.sleep(min(5 * attempt, 30))
+            else:
+                logger.error("All reconnect attempts failed. Waiting 60s...")
+                await asyncio.sleep(60)
 
     async def get_historical_ticks(self, symbol: str, count: int = 5000) -> list:
         """Fetch historical tick data for priming."""
@@ -199,6 +223,8 @@ class DerivTickClient:
     async def disconnect(self):
         """Disconnect from Deriv."""
         self.connected = False
+        if self._keepalive_task:
+            self._keepalive_task.cancel()
         if self._listen_task:
             self._listen_task.cancel()
         if self.ws:

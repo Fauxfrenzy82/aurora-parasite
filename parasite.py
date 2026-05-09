@@ -135,7 +135,6 @@ class AuroraParasite:
         logger.info("AURORA PARASITE IS LIVE")
         logger.info(f"   Instruments: {len(config.INSTRUMENTS)}")
         logger.info(f"   Branches: {len(self.cortex.branches)}")
-        logger.info(f"   Max Drawdown: {config.HARD_STOP_DRAWDOWN*100}%")
 
         while self.running:
             await asyncio.sleep(1)

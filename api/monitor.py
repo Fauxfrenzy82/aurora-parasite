@@ -84,4 +84,82 @@ class MonitorAPI:
             trades = await parasite.db.get_trades(limit=limit)
             return JSONResponse(trades)
 
-        @app
+        @app.get("/api/trades/stats")
+        async def get_trade_stats():
+            stats = await parasite.db.get_trade_stats()
+            return JSONResponse(stats)
+
+        @app.get("/api/laws")
+        async def get_laws():
+            return JSONResponse(parasite.memory.get_stats())
+
+        @app.get("/api/layers")
+        async def get_layers():
+            return JSONResponse({
+                "spread_capture": parasite.spread_capture.get_stats(),
+                "tick_momentum": parasite.tick_momentum.get_stats(),
+                "fade_engine": parasite.fade_engine.get_stats(),
+                "news_scalper": parasite.news_scalper.get_stats(),
+                "cross_instrument": parasite.cross_instrument.get_stats(),
+            })
+
+        @app.get("/api/exposure")
+        async def get_exposure():
+            return JSONResponse(parasite.dynamic_exposure.get_stats())
+
+        @app.get("/api/nervous_system")
+        async def get_nervous_system():
+            return JSONResponse(parasite.nervous_system.get_stats())
+
+        @app.post("/api/control")
+        async def control(action: str = Query(...)):
+            action = action.lower().strip()
+            if action == "halt":
+                parasite.halt("Manual halt via API")
+                return {"status": "halted"}
+            elif action == "resume":
+                parasite.resume()
+                return {"status": "resumed"}
+            elif action == "close_all":
+                count = 0
+                for pos_id in list(parasite.execution.active_positions.keys()):
+                    await parasite.execution._close_position(pos_id, 0)
+                    count += 1
+                return {"status": "closed", "count": count}
+            else:
+                return {"status": "error", "message": f"Unknown action: {action}"}
+
+        @app.websocket("/ws")
+        async def websocket_endpoint(websocket: WebSocket):
+            await websocket.accept()
+            async with self.ws_lock:
+                self.active_websockets.append(websocket)
+
+            try:
+                await websocket.send_json({
+                    "type": "state_update",
+                    "data": parasite.get_stats(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+
+                while True:
+                    try:
+                        data = await asyncio.wait_for(websocket.receive_text(), timeout=10)
+                        if data == "ping":
+                            await websocket.send_text("pong")
+                    except asyncio.TimeoutError:
+                        try:
+                            await websocket.send_json({
+                                "type": "heartbeat",
+                                "data": parasite.get_stats(),
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                            })
+                        except:
+                            break
+
+            except WebSocketDisconnect:
+                pass
+            finally:
+                async with self.ws_lock:
+                    if websocket in self.active_websockets:
+                        self.active_websockets.remove(websocket)

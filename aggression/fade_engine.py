@@ -1,7 +1,6 @@
 """
 Fade Engine — Layer 3.
 Fades panic spikes by placing limit orders into the spike.
-Lowered thresholds for higher frequency.
 """
 
 import asyncio
@@ -26,7 +25,7 @@ class FadeEngine:
 
     async def run(self):
         self.running = True
-        logger.info("Fade Engine online (lowered thresholds)")
+        logger.info("Fade Engine online")
 
         while self.running:
             try:
@@ -53,7 +52,6 @@ class FadeEngine:
 
         latest = buffer[-1]
 
-        # LOWERED THRESHOLDS
         if latest.tick_velocity < 12.0:
             return
         if latest.spread_ratio < 1.2:
@@ -77,27 +75,25 @@ class FadeEngine:
         risk_pct = config.LAYER_RISK.get("fade_engine", 0.007)
         risk_amount = config.INITIAL_CAPITAL * risk_pct
 
-        entry_price = tick.ask if direction == "BUY" else tick.bid
-
-        order = await self.parasite.execution._place_order(symbol, direction, entry_price, risk_amount)
+        order = await self.parasite.execution._place_order(symbol, direction, risk_amount)
         if not order:
             return
 
         self.active_fades[symbol] = {
             "trade_id": trade_id, "symbol": symbol, "direction": direction,
-            "entry_price": entry_price, "risk_amount": risk_amount,
-            "opened_at": time.time(), "order_id": order.get("orderId", ""),
+            "entry_price": tick.ask if direction == "BUY" else tick.bid,
+            "risk_amount": risk_amount, "opened_at": time.time(),
+            "order_id": order.get("orderId", ""),
         }
 
         asyncio.create_task(self._monitor_fade(symbol))
-        logger.layer("fade_engine", "ENTER", f"{symbol} {direction} @ {entry_price:.5f}")
+        logger.layer("fade_engine", "ENTER", f"{symbol} {direction}")
 
     async def _monitor_fade(self, symbol: str):
         position = self.active_fades.get(symbol)
         if not position:
             return
 
-        start_time = time.time()
         entry_price = position["entry_price"]
         direction = position["direction"]
 
@@ -108,11 +104,9 @@ class FadeEngine:
             if not buffer or len(buffer) < 2:
                 continue
 
-            elapsed = time.time() - start_time
             current_mid = buffer[-1].mid_price
             risk = position["risk_amount"]
 
-            # Take profit on reversion
             if direction == "SELL" and current_mid <= entry_price:
                 await self._exit_fade(symbol, current_mid)
                 break
@@ -120,7 +114,6 @@ class FadeEngine:
                 await self._exit_fade(symbol, current_mid)
                 break
 
-            # Cut loss
             if direction == "SELL" and current_mid > entry_price + (risk / 0.01) * 1.5:
                 await self._exit_fade(symbol, current_mid)
                 break

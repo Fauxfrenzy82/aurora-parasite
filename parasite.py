@@ -3,6 +3,7 @@ Aurora Parasite — Main entry point.
 Self-evolving market organism with tick-level learning.
 Auto-halts when balance cap is reached.
 Polls live balance from Deriv every 30 seconds.
+Layers auto-restart on crash.
 """
 
 import asyncio
@@ -104,7 +105,7 @@ class AuroraParasite:
 
     async def _balance_updater(self):
         """Poll live balance from Deriv every 30 seconds."""
-        await asyncio.sleep(10)  # Wait for connection to stabilize
+        await asyncio.sleep(10)
         while self.running:
             try:
                 if self.tick_client.connected and self.tick_client.ws:
@@ -121,6 +122,7 @@ class AuroraParasite:
             await asyncio.sleep(30)
 
     async def _process_signal_queue(self):
+        """Process signals from nervous system through cortex."""
         logger.info("Signal processing loop started")
         while self.running:
             try:
@@ -141,13 +143,25 @@ class AuroraParasite:
                 logger.error(f"Signal processing error: {e}")
 
     async def start_aggression(self):
+        """Start all aggression layers with auto-restart on crash."""
         logger.info("Starting aggression layers...")
-        asyncio.create_task(self.spread_capture.run())
-        asyncio.create_task(self.tick_momentum.run())
-        asyncio.create_task(self.fade_engine.run())
-        asyncio.create_task(self.news_scalper.run())
-        asyncio.create_task(self.cross_instrument.run())
-        logger.info("All 5 aggression layers online")
+
+        async def run_layer(layer, name):
+            while self.running:
+                try:
+                    await layer.run()
+                except Exception as e:
+                    logger.error(f"{name} crashed: {e}. Restarting in 5s...")
+                    layer.running = False
+                    await asyncio.sleep(5)
+                    layer.running = True
+
+        asyncio.create_task(run_layer(self.spread_capture, "spread_capture"))
+        asyncio.create_task(run_layer(self.tick_momentum, "tick_momentum"))
+        asyncio.create_task(run_layer(self.fade_engine, "fade_engine"))
+        asyncio.create_task(run_layer(self.news_scalper, "news_scalper"))
+        asyncio.create_task(run_layer(self.cross_instrument, "cross_instrument"))
+        logger.info("All 5 aggression layers online (auto-restart enabled)")
 
     async def run(self):
         if not await self.initialize():
@@ -171,9 +185,9 @@ class AuroraParasite:
                 try:
                     current_balance = self.tick_client._balance
                     if current_balance >= self.balance_cap:
-                        self.halt(f"Balance cap reached: ${current_balance:.2f} (cap: ${self.balance_cap:.2f})")
+                        self.halted = True
                         self.cap_halted = True
-                        logger.info(f"💰 BALANCE CAP HIT: ${current_balance:.2f}")
+                        logger.info(f"💰 BALANCE CAP HIT: ${current_balance:.2f} (cap: ${self.balance_cap:.2f})")
                 except Exception:
                     pass
 

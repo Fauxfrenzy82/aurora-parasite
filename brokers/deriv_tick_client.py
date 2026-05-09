@@ -1,7 +1,7 @@
 """
 Deriv Tick Client — Raw WebSocket tick stream.
 Handles OTP authentication and subscribes to tick data for all instruments.
-Features keep-alive pings and auto-reconnection with fresh OTP.
+Features keep-alive pings, auto-reconnection, and active symbol mapping.
 """
 
 import asyncio
@@ -17,7 +17,7 @@ logger = get_logger("tick_client")
 
 
 class DerivTickClient:
-    """Raw WebSocket tick client for Deriv API with keep-alive and auto-reconnect."""
+    """Raw WebSocket tick client for Deriv API with keep-alive, auto-reconnect, and symbol mapping."""
 
     REST_API_BASE = "https://api.derivws.com"
     WS_PING_INTERVAL = 20
@@ -38,6 +38,7 @@ class DerivTickClient:
         self._req_id = 0
         self._pending: dict = {}
         self._subscriptions: set = set()
+        self.symbol_map: Dict[str, str] = {}  # display_name → shortcode
 
     async def connect(self, app_id: str, api_token: str) -> bool:
         """Connect to Deriv and authenticate."""
@@ -52,8 +53,8 @@ class DerivTickClient:
 
                 self.ws = await websockets.connect(ws_url, ping_interval=self.WS_PING_INTERVAL)
                 self.connected = True
-                
-                # Re-subscribe to any previously subscribed symbols
+
+                # Re-subscribe to previously subscribed symbols
                 for symbol in self._subscriptions:
                     msg = {"ticks": symbol, "subscribe": 1}
                     self._req_id += 1
@@ -63,14 +64,36 @@ class DerivTickClient:
                     except:
                         pass
 
+                # Fetch active symbols for correct shortcode mapping
+                await self._fetch_symbol_map()
+
                 self._listen_task = asyncio.create_task(self._listen_loop())
                 self._keepalive_task = asyncio.create_task(self._keepalive())
-                
+
                 logger.info("Deriv tick client connected")
                 return True
             except Exception as e:
                 logger.error(f"Connection failed: {e}")
                 return False
+
+    async def _fetch_symbol_map(self):
+        """Fetch active symbols to map display names to shortcodes."""
+        try:
+            resp = await self._send({"active_symbols": "brief"})
+            symbols = resp.get("active_symbols", [])
+            for s in symbols:
+                name = s.get("display_name", "")
+                short = s.get("shortcode", "")
+                market = s.get("market", "")
+                if short:
+                    # Map both display name and market name
+                    if name:
+                        self.symbol_map[name] = short
+                    if market:
+                        self.symbol_map[market] = short
+            logger.info(f"Fetched {len(self.symbol_map)} symbol mappings")
+        except Exception as e:
+            logger.warning(f"Symbol map fetch failed: {e}")
 
     async def _keepalive(self):
         """Send periodic pings to keep WebSocket alive."""
@@ -181,8 +204,7 @@ class DerivTickClient:
 
             self.connected = False
             self.ws = None
-            
-            # Reconnect with exponential backoff
+
             for attempt in range(1, 11):
                 logger.info(f"Reconnect attempt {attempt}/10...")
                 try:

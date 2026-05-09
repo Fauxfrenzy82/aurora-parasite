@@ -33,6 +33,8 @@ class DerivTickClient:
         self._account_id = ""
         self._balance = 10000.0
         self._currency = "USD"
+        self._req_id = 0
+        self._pending: dict = {}
 
     async def connect(self, app_id: str, api_token: str) -> bool:
         """Connect to Deriv and authenticate."""
@@ -41,12 +43,10 @@ class DerivTickClient:
 
         async with self._lock:
             try:
-                # Get OTP WebSocket URL
                 ws_url = await self._get_otp_url()
                 if not ws_url:
                     return False
 
-                # Connect
                 self.ws = await websockets.connect(ws_url, ping_interval=self.WS_PING_INTERVAL)
                 self.connected = True
                 self._listen_task = asyncio.create_task(self._listen_loop())
@@ -64,7 +64,6 @@ class DerivTickClient:
             "Content-Type": "application/json"
         }
 
-        # Find options account
         try:
             async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
                 list_url = f"{self.REST_API_BASE}/trading/v1/options/accounts"
@@ -74,7 +73,6 @@ class DerivTickClient:
                     if accounts:
                         self._account_id = accounts[0].get("account_id", "")
                     else:
-                        # Create demo account
                         create_resp = await client.post(list_url, headers=headers, json={
                             "currency": "USD", "group": "row", "account_type": "demo"
                         })
@@ -86,7 +84,6 @@ class DerivTickClient:
                 if not self._account_id:
                     return None
 
-                # Get OTP
                 otp_url = f"{self.REST_API_BASE}/trading/v1/options/accounts/{self._account_id}/otp"
                 otp_resp = await client.post(otp_url, headers=headers)
                 if otp_resp.status_code == 200:
@@ -97,29 +94,36 @@ class DerivTickClient:
         return None
 
     async def subscribe(self, symbol: str, callback: Callable):
-        """Subscribe to tick data for a symbol."""
+        """Subscribe to tick data for a symbol. Fire-and-forget — no response expected."""
         if symbol not in self._callbacks:
             self._callbacks[symbol] = []
         self._callbacks[symbol].append(callback)
 
         if self.connected and self.ws:
-            await self._send({"ticks": symbol})
+            msg = {"ticks": symbol, "subscribe": 1}
+            self._req_id += 1
+            msg["req_id"] = self._req_id
+            try:
+                await self.ws.send(json.dumps(msg))
+                logger.debug(f"Subscribed to {symbol}")
+            except Exception as e:
+                logger.error(f"Subscribe error for {symbol}: {e}")
 
-    async def _send(self, msg: dict) -> dict:
-        """Send message and await response."""
+    async def _send(self, msg: dict, timeout: float = 10) -> dict:
+        """Send message and await response. Only used for non-streaming requests."""
         if not self.ws:
             raise Exception("Not connected")
         future = asyncio.get_event_loop().create_future()
-        msg["req_id"] = int(time.time() * 1000000)
-        self._pending = getattr(self, '_pending', {})
-        self._pending[msg["req_id"]] = future
+        self._req_id += 1
+        msg["req_id"] = self._req_id
+        self._pending[self._req_id] = future
         await self.ws.send(json.dumps(msg))
-        return await asyncio.wait_for(future, timeout=10)
+        return await asyncio.wait_for(future, timeout=timeout)
 
     async def _listen_loop(self):
         """Listen for incoming messages and dispatch to callbacks."""
         self._pending = {}
-        while self.connected:
+        while True:
             try:
                 if not self.ws:
                     await asyncio.sleep(1)
@@ -151,9 +155,20 @@ class DerivTickClient:
                 logger.warning(f"Listen error: {e}")
 
             self.connected = False
+            self.ws = None
             await asyncio.sleep(5)
+            
+            # Reconnect and re-subscribe
             try:
-                await self.connect(self.app_id, self.api_token)
+                if await self.connect(self.app_id, self.api_token):
+                    for symbol in self._callbacks:
+                        msg = {"ticks": symbol, "subscribe": 1}
+                        self._req_id += 1
+                        msg["req_id"] = self._req_id
+                        try:
+                            await self.ws.send(json.dumps(msg))
+                        except:
+                            pass
             except:
                 await asyncio.sleep(30)
 

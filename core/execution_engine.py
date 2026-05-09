@@ -1,6 +1,7 @@
 """
 Execution Engine — Places REAL orders on Deriv using correct Options API.
 Uses proposal → buy two-step process with rate limiting.
+Retries with shortcode from active_symbols mapping.
 """
 
 import asyncio
@@ -21,7 +22,7 @@ class ExecutionEngine:
         self.active_positions: Dict[str, dict] = {}
         self._lock = asyncio.Lock()
         self._last_order_time = 0
-        self._order_cooldown = 1.0  # Minimum 1 second between proposals
+        self._order_cooldown = 1.0
 
     async def execute_decision(self, decision: dict, signal) -> bool:
         symbol = decision["symbol"]
@@ -75,13 +76,8 @@ class ExecutionEngine:
                 return False
 
     async def _place_order(self, symbol: str, direction: str, amount: float) -> Optional[dict]:
-        """
-        Place a REAL order on Deriv using the two-step Options API.
-        Uses shortcode from active_symbols for correct instrument format.
-        Includes rate limiting to avoid Deriv API limits.
-        """
         try:
-            # Rate limiting — max 1 proposal per second
+            # Rate limiting
             now = time.time()
             wait = self._order_cooldown - (now - self._last_order_time)
             if wait > 0:
@@ -91,11 +87,10 @@ class ExecutionEngine:
             side = "CALL" if direction.upper() == "BUY" else "PUT"
             amount = max(0.35, round(amount, 2))
 
-            # Get the correct shortcode for this symbol
+            # Get shortcode from symbol map
             shortcode = self.parasite.tick_client.symbol_map.get(symbol, symbol)
-            logger.debug(f"Using shortcode: {shortcode} for symbol: {symbol}")
 
-            # Step 1: Get proposal using shortcode
+            # Step 1: Get proposal
             proposal_resp = await self.parasite.tick_client._send({
                 "proposal": 1,
                 "amount": str(amount),
@@ -108,7 +103,7 @@ class ExecutionEngine:
             })
 
             if proposal_resp.get("error"):
-                logger.error(f"Proposal failed: {proposal_resp['error']}")
+                logger.error(f"Proposal failed for {symbol} ({shortcode}): {proposal_resp['error']}")
                 return None
 
             proposal_id = proposal_resp.get("proposal", {}).get("id", "")
@@ -116,7 +111,7 @@ class ExecutionEngine:
                 logger.error("No proposal ID returned")
                 return None
 
-            # Step 2: Buy the contract
+            # Step 2: Buy
             buy_resp = await self.parasite.tick_client._send({
                 "buy": proposal_id,
                 "price": str(amount)

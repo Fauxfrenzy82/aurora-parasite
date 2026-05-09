@@ -22,7 +22,7 @@ from aggression.news_scalper import NewsScalper
 from aggression.cross_instrument import CrossInstrumentArb
 from risk.dynamic_exposure import DynamicExposure
 from risk.correlation_matrix import CorrelationMatrix
-from api.monitor import MonitorAPI
+from monitor import MonitorAPI
 import uvicorn
 
 logger = get_logger("main")

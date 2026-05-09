@@ -1,5 +1,5 @@
 """
-Logger — Structured logging with console and file output.u
+Logger — Structured logging with console and file output.
 """
 
 import logging

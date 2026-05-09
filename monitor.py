@@ -1,6 +1,6 @@
 """
 Monitor API — FastAPI server for live dashboard.
-Shows real-time system state, trade stream, and controls.
+Shows real-time system state, trade stream, and controls. 
 """
 
 import asyncio

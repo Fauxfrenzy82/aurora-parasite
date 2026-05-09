@@ -14,11 +14,7 @@ logger = get_logger("spread_capture")
 
 
 class SpreadCapture:
-    """
-    Captures spread expansions by placing limit orders on both sides.
-    When one fills, the other becomes the exit. Exploits mean reversion
-    of synthetic index spreads.
-    """
+    """Captures spread expansions by placing limit orders on both sides."""
 
     def __init__(self, parasite):
         self.parasite = parasite
@@ -31,7 +27,6 @@ class SpreadCapture:
         self._cooldowns: dict = {}
 
     async def run(self):
-        """Main spread capture loop."""
         self.running = True
         logger.info("Spread Capture Engine online")
 
@@ -51,7 +46,6 @@ class SpreadCapture:
                 await asyncio.sleep(1)
 
     async def _check_symbol(self, symbol: str):
-        """Check if spread capture conditions are met for a symbol."""
         if symbol in self.active_captures:
             return
 
@@ -83,37 +77,28 @@ class SpreadCapture:
         await self._execute_capture(symbol, latest.bid, latest.ask)
 
     async def _execute_capture(self, symbol: str, bid: float, ask: float):
-        """Execute a spread capture on both sides."""
         capture_id = f"SC_{uuid.uuid4().hex[:8]}"
         risk_pct = config.LAYER_RISK.get("spread_capture", 0.003)
         risk_amount = config.INITIAL_CAPITAL * risk_pct
 
-        buy_order = await self.parasite.execution._place_order(
-            symbol, "BUY", bid, risk_amount
-        )
-        sell_order = await self.parasite.execution._place_order(
-            symbol, "SELL", ask, risk_amount
-        )
+        buy_order = await self.parasite.execution._place_order(symbol, "BUY", risk_amount)
+        sell_order = await self.parasite.execution._place_order(symbol, "SELL", risk_amount)
 
         if not buy_order or not sell_order:
             return
 
         self.active_captures[symbol] = {
-            "capture_id": capture_id,
-            "symbol": symbol,
-            "bid": bid,
-            "ask": ask,
+            "capture_id": capture_id, "symbol": symbol,
+            "bid": bid, "ask": ask,
             "buy_order_id": buy_order.get("orderId", ""),
             "sell_order_id": sell_order.get("orderId", ""),
-            "risk_amount": risk_amount,
-            "opened_at": time.time(),
+            "risk_amount": risk_amount, "opened_at": time.time(),
         }
 
         asyncio.create_task(self._monitor_capture(symbol, capture_id))
         logger.layer("spread_capture", "OPEN", f"{symbol} bid={bid:.5f} ask={ask:.5f}")
 
     async def _monitor_capture(self, symbol: str, capture_id: str):
-        """Monitor capture for fill and manage exit."""
         capture = self.active_captures.get(symbol)
         if not capture:
             return
@@ -164,7 +149,6 @@ class SpreadCapture:
                 break
 
     async def _close_capture(self, symbol: str, filled_side: str, fill_price: float, exit_price: float):
-        """Close a filled capture and record result."""
         capture = self.active_captures.pop(symbol, None)
         if not capture:
             return
@@ -179,17 +163,12 @@ class SpreadCapture:
         else:
             profit = fill_price - exit_price
 
-        # R = profit in price units / spread (the captured edge)
         r_multiple = profit / spread if spread > 0 else 0
 
         trade_data = {
             "trade_id": f"TRD_{capture['capture_id']}",
-            "instrument": symbol,
-            "layer": "spread_capture",
-            "branch_id": "",
-            "direction": filled_side,
-            "entry_price": fill_price,
-            "exit_price": exit_price,
+            "instrument": symbol, "layer": "spread_capture", "branch_id": "",
+            "direction": filled_side, "entry_price": fill_price, "exit_price": exit_price,
             "r_multiple": round(r_multiple, 4),
             "profit_currency": round(r_multiple * risk_amount, 4),
             "duration_ms": int((time.time() - capture["opened_at"]) * 1000),
@@ -204,7 +183,6 @@ class SpreadCapture:
         logger.trade("CLOSE", symbol, "spread_capture", {"r": round(r_multiple, 3)})
 
     async def _cancel_capture(self, symbol: str):
-        """Cancel an unfilled capture (loss or timeout)."""
         capture = self.active_captures.pop(symbol, None)
         if not capture:
             return
@@ -214,9 +192,7 @@ class SpreadCapture:
         loss_r = -0.5
         trade_data = {
             "trade_id": f"TRD_{capture['capture_id']}",
-            "instrument": symbol,
-            "layer": "spread_capture",
-            "branch_id": "",
+            "instrument": symbol, "layer": "spread_capture", "branch_id": "",
             "direction": "CANCEL",
             "entry_price": (capture["bid"] + capture["ask"]) / 2,
             "exit_price": (capture["bid"] + capture["ask"]) / 2,

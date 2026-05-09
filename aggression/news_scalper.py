@@ -1,7 +1,6 @@
 """
 News Scalper — Layer 4.
 Detects simultaneous volatility spikes across multiple instruments.
-Lowered simultaneous threshold for higher frequency.
 """
 
 import asyncio
@@ -29,7 +28,7 @@ class NewsScalper:
 
     async def run(self):
         self.running = True
-        logger.info("News Scalper online (lowered thresholds)")
+        logger.info("News Scalper online")
 
         while self.running:
             try:
@@ -86,8 +85,8 @@ class NewsScalper:
             return
         tick = buffer[-1]
 
-        buy_order = await self.parasite.execution._place_order(symbol, "BUY", tick.ask, risk_amount)
-        sell_order = await self.parasite.execution._place_order(symbol, "SELL", tick.bid, risk_amount)
+        buy_order = await self.parasite.execution._place_order(symbol, "BUY", risk_amount)
+        sell_order = await self.parasite.execution._place_order(symbol, "SELL", risk_amount)
 
         if not buy_order or not sell_order:
             return
@@ -155,7 +154,8 @@ class NewsScalper:
         trade_data = {
             "trade_id": f"TRD_{position['trade_id']}",
             "instrument": symbol, "layer": "news_scalper", "branch_id": "",
-            "direction": "STRADDLE", "entry_price": (position["entry_buy"] + position["entry_sell"]) / 2,
+            "direction": "STRADDLE",
+            "entry_price": (position["entry_buy"] + position["entry_sell"]) / 2,
             "exit_price": 0, "r_multiple": round(combined_r, 4),
             "profit_currency": round(combined_r * risk, 4),
             "duration_ms": int((time.time() - position["opened_at"]) * 1000),

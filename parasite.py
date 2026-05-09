@@ -1,9 +1,11 @@
 """
 Aurora Parasite — Main entry point.
 Self-evolving market organism with tick-level learning.
+Auto-halts when balance cap is reached.
 """
 
 import asyncio
+import os
 import signal
 import sys
 import time
@@ -39,6 +41,10 @@ class AuroraParasite:
         self.start_time = time.time()
         self.total_trades = 0
         self.total_r = 0.0
+
+        # Balance cap — auto-halt when reached (configurable via env var)
+        self.balance_cap = float(os.getenv("BALANCE_CAP", "500.0"))
+        self.cap_halted = False
 
         self.tick_client = DerivTickClient()
         self.db = ParasiteDB()
@@ -93,6 +99,7 @@ class AuroraParasite:
         asyncio.create_task(self._process_signal_queue())
 
         logger.info(f"Aurora Parasite initialized — {len(self.cortex.branches)} branches ready")
+        logger.info(f"Balance Cap: ${self.balance_cap:.2f}")
         return True
 
     async def _process_signal_queue(self):
@@ -135,9 +142,21 @@ class AuroraParasite:
         logger.info("AURORA PARASITE IS LIVE")
         logger.info(f"   Instruments: {len(config.INSTRUMENTS)}")
         logger.info(f"   Branches: {len(self.cortex.branches)}")
+        logger.info(f"   Balance Cap: ${self.balance_cap:.2f}")
 
         while self.running:
             await asyncio.sleep(1)
+
+            # Auto-halt when balance cap is reached
+            if not self.cap_halted and not self.halted:
+                try:
+                    current_balance, _ = self.tick_client.get_balance()
+                    if current_balance >= self.balance_cap:
+                        self.halt(f"Balance cap reached: ${current_balance:.2f} (cap: ${self.balance_cap:.2f})")
+                        self.cap_halted = True
+                        logger.info(f"💰 BALANCE CAP HIT: ${current_balance:.2f}")
+                except Exception:
+                    pass
 
     async def shutdown(self):
         logger.info("Shutting down Aurora Parasite...")
@@ -151,6 +170,7 @@ class AuroraParasite:
 
     def resume(self):
         self.halted = False
+        self.cap_halted = False
         logger.info("Trading resumed")
 
     def get_stats(self) -> dict:
@@ -162,10 +182,19 @@ class AuroraParasite:
             "cross_instrument": self.cross_instrument.get_stats(),
         }
 
+        current_balance = 0
+        try:
+            current_balance, _ = self.tick_client.get_balance()
+        except:
+            pass
+
         return {
             "running": self.running,
             "halted": self.halted,
             "initial_capital": config.INITIAL_CAPITAL,
+            "current_balance": current_balance,
+            "balance_cap": self.balance_cap,
+            "cap_halted": self.cap_halted,
             "uptime_seconds": time.time() - self.start_time,
             "total_trades": self.total_trades,
             "total_r": round(self.total_r, 2),

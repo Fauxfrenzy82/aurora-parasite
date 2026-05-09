@@ -13,8 +13,10 @@ export default function Home() {
 
   useEffect(() => {
     const load = async () => {
-      const s = await fetchStatus();
-      setStatus(s);
+      try {
+        const s = await fetchStatus();
+        setStatus(s);
+      } catch {}
     };
     load();
     const interval = setInterval(load, 3000);
@@ -23,9 +25,13 @@ export default function Home() {
 
   const handleControl = async (action: string) => {
     setLoading(action);
-    await sendControl(action);
+    try {
+      await sendControl(action);
+    } catch {}
     setTimeout(async () => {
-      setStatus(await fetchStatus());
+      try {
+        setStatus(await fetchStatus());
+      } catch {}
       setLoading(null);
     }, 500);
   };
@@ -35,6 +41,17 @@ export default function Home() {
       <StatusBar status={status} />
 
       <div className="pt-10 px-3 space-y-3">
+        {status?.cap_halted && (
+          <div className="text-center py-3 bg-amber-500/10 border border-amber-500/30 rounded">
+            <span className="text-amber text-sm font-bold">
+              💰 BALANCE CAP REACHED: ${status.balance_cap?.toFixed(0)}
+            </span>
+            <p className="text-amber text-xs mt-1">
+              Withdraw from Deriv, then tap RESUME to continue compounding
+            </p>
+          </div>
+        )}
+
         <PnLDisplay
           totalR={status?.total_r || 0}
           avgR={status?.avg_r_per_trade || 0}
@@ -49,9 +66,7 @@ export default function Home() {
           <div className="bg-parasite-surface border border-parasite-border rounded p-3 text-[10px] flex justify-between">
             <span>BRANCHES: <span className="text-parasite-green">{status.cortex.total_branches}</span> ({status.cortex.promoted} promoted)</span>
             <span>LAWS: <span className="text-amber">{status.memory?.total_laws || 0}</span></span>
-            <span>EXPOSURE: <span className={status.exposure?.current_exposure > status.exposure?.max_exposure * 0.8 ? 'text-loss' : 'text-muted'}>
-              {(status.exposure?.current_exposure * 100).toFixed(0)}%
-            </span></span>
+            <span>TICKS: <span className="text-muted">{(status.nervous_system?.total_ticks || 0).toLocaleString()}</span></span>
           </div>
         )}
       </div>

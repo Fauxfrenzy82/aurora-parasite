@@ -28,7 +28,7 @@ class SpreadCapture:
         self.total_wins = 0
         self.total_r = 0.0
         self.last_activity = time.time()
-        self._cooldowns: dict = {}  # symbol -> timestamp when cooldown ends
+        self._cooldowns: dict = {}
 
     async def run(self):
         """Main spread capture loop."""
@@ -52,15 +52,12 @@ class SpreadCapture:
 
     async def _check_symbol(self, symbol: str):
         """Check if spread capture conditions are met for a symbol."""
-        # Skip if already capturing this symbol
         if symbol in self.active_captures:
             return
 
-        # Skip if in cooldown
         if symbol in self._cooldowns and time.time() < self._cooldowns[symbol]:
             return
 
-        # Skip if at max positions per instrument
         existing = [
             p for p in self.parasite.execution.active_positions.values()
             if p["symbol"] == symbol and p["layer"] == "spread_capture"
@@ -68,27 +65,21 @@ class SpreadCapture:
         if len(existing) >= config.MAX_POSITIONS_PER_INSTRUMENT:
             return
 
-        # Get latest tick data
         buffer = self.parasite.nervous_system.tick_buffers.get(symbol)
         if not buffer or len(buffer) < 20:
             return
 
         latest = buffer[-1]
 
-        # Check conditions:
-        # 1. Tick velocity below threshold (quiet market)
-        # 2. Spread above threshold (widened — capture opportunity)
-        # 3. Spread is meaningful (not zero)
         if latest.tick_velocity > config.SPREAD_CAPTURE_MAX_VELOCITY:
             return
         if latest.spread_ratio < config.SPREAD_CAPTURE_SPREAD_RATIO:
             return
 
         spread = latest.ask - latest.bid
-        if spread <= 0 or spread > latest.mid_price * 0.01:  # Sanity check
+        if spread <= 0 or spread > latest.mid_price * 0.01:
             return
 
-        # Execute bidirectional capture
         await self._execute_capture(symbol, latest.bid, latest.ask)
 
     async def _execute_capture(self, symbol: str, bid: float, ask: float):
@@ -129,18 +120,16 @@ class SpreadCapture:
 
         start_time = time.time()
         max_duration = config.SPREAD_CAPTURE_MAX_DURATION
-        min_hold = 3.0  # MUST hold at least 3 seconds before any exit
+        min_hold = 3.0
         check_interval = 0.3
 
         while symbol in self.active_captures:
             await asyncio.sleep(check_interval)
             elapsed = time.time() - start_time
 
-            # Don't exit before minimum hold time
             if elapsed < min_hold:
                 continue
 
-            # Timeout
             if elapsed > max_duration:
                 await self._cancel_capture(symbol)
                 break
@@ -156,25 +145,21 @@ class SpreadCapture:
             if spread <= 0:
                 continue
 
-            # Exit if price moved too far against us (>2x spread)
             if abs(current_mid - entry_mid) > spread * 2.0:
                 await self._cancel_capture(symbol)
                 break
 
-            # Check for fill — use recent ticks, not just the latest
             recent_ticks = list(buffer)[-5:]
             recent_lows = min(t.bid for t in recent_ticks)
             recent_highs = max(t.ask for t in recent_ticks)
 
-            # Buy filled if price touched or crossed below the bid
             if recent_lows <= capture["bid"]:
-                exit_price = capture["ask"]  # Exit at the ask (other side)
+                exit_price = capture["ask"]
                 await self._close_capture(symbol, "BUY", capture["bid"], exit_price)
                 break
 
-            # Sell filled if price touched or crossed above the ask
             if recent_highs >= capture["ask"]:
-                exit_price = capture["bid"]  # Exit at the bid (other side)
+                exit_price = capture["bid"]
                 await self._close_capture(symbol, "SELL", capture["ask"], exit_price)
                 break
 
@@ -184,19 +169,18 @@ class SpreadCapture:
         if not capture:
             return
 
-        # Set cooldown to prevent immediate re-entry
         self._cooldowns[symbol] = time.time() + 2.0
 
         spread = capture["ask"] - capture["bid"]
         risk_amount = capture["risk_amount"]
 
-        # Calculate R: profit in price units divided by risk per unit
         if filled_side == "BUY":
             profit = exit_price - fill_price
         else:
             profit = fill_price - exit_price
 
-        r_multiple = profit / (risk_amount / 0.01) if risk_amount > 0 else 0
+        # R = profit in price units / spread (the captured edge)
+        r_multiple = profit / spread if spread > 0 else 0
 
         trade_data = {
             "trade_id": f"TRD_{capture['capture_id']}",
@@ -225,7 +209,6 @@ class SpreadCapture:
         if not capture:
             return
 
-        # Set cooldown
         self._cooldowns[symbol] = time.time() + 2.0
 
         loss_r = -0.5

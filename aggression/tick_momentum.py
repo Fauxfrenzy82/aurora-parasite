@@ -1,7 +1,6 @@
 """
 Tick Momentum Engine — Layer 2.
 Surfs micro-trends detected through consecutive directional ticks.
-Loosened thresholds for higher frequency.
 """
 
 import asyncio
@@ -26,7 +25,7 @@ class TickMomentum:
 
     async def run(self):
         self.running = True
-        logger.info("Tick Momentum Engine online (loosened thresholds)")
+        logger.info("Tick Momentum Engine online")
 
         while self.running:
             try:
@@ -53,7 +52,6 @@ class TickMomentum:
 
         latest = buffer[-1]
 
-        # LOOSENED THRESHOLDS
         if latest.tick_velocity < 6.0:
             return
         if latest.spread_ratio > 1.3:
@@ -81,21 +79,21 @@ class TickMomentum:
         risk_amount = config.INITIAL_CAPITAL * risk_pct
 
         dir_str = "BUY" if direction == 1 else "SELL"
-        entry_price = tick.ask if direction == 1 else tick.bid
 
-        order = await self.parasite.execution._place_order(symbol, dir_str, entry_price, risk_amount)
+        order = await self.parasite.execution._place_order(symbol, dir_str, risk_amount)
         if not order:
             return
 
         self.active_trends[symbol] = {
             "trade_id": trade_id, "symbol": symbol, "direction": dir_str,
-            "entry_price": entry_price, "risk_amount": risk_amount,
+            "entry_price": tick.ask if direction == 1 else tick.bid,
+            "risk_amount": risk_amount,
             "pyramid_level": 0, "consecutive_count": 0,
             "opened_at": time.time(), "order_id": order.get("orderId", ""),
         }
 
         asyncio.create_task(self._monitor_trend(symbol))
-        logger.layer("tick_momentum", "ENTER", f"{symbol} {dir_str} @ {entry_price:.5f}")
+        logger.layer("tick_momentum", "ENTER", f"{symbol} {dir_str}")
 
     async def _monitor_trend(self, symbol: str):
         position = self.active_trends.get(symbol)
@@ -125,11 +123,9 @@ class TickMomentum:
                 pos["consecutive_count"] += 1
                 if pos["consecutive_count"] >= 3 and pos["pyramid_level"] < 4:
                     add_size = pos["risk_amount"] * 0.5
-                    current_price = latest.ask if direction == "BUY" else latest.bid
-                    await self.parasite.execution._place_order(symbol, direction, current_price, add_size)
+                    await self.parasite.execution._place_order(symbol, direction, add_size)
                     pos["pyramid_level"] += 1
                     pos["consecutive_count"] = 0
-                    logger.trade("PYRAMID", symbol, "tick_momentum", {"level": pos["pyramid_level"]})
             else:
                 pos["consecutive_count"] = 0
 

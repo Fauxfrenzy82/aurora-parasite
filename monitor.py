@@ -1,6 +1,7 @@
 """
 Monitor API — FastAPI server for live dashboard.
-Shows real-time system state, trade stream, and controls. 
+Shows real-time system state, trade stream, and controls.
+Supports both GET (browser) and POST (frontend) for control actions.
 """
 
 import asyncio
@@ -28,7 +29,6 @@ class MonitorAPI:
         self.ws_lock = asyncio.Lock()
         self.start_time = datetime.now(timezone.utc)
 
-        # Setup CORS
         self.app.add_middleware(
             CORSMiddleware,
             allow_origins=["*"],
@@ -37,8 +37,32 @@ class MonitorAPI:
             allow_headers=["*"],
         )
 
-        # Register routes
         self._register_routes()
+
+    async def _handle_control(self, action: str) -> dict:
+        """Handle control actions from both GET and POST."""
+        action = action.lower().strip()
+        if action == "halt":
+            self.parasite.halt("Manual halt via API")
+            return {"status": "halted", "reason": self.parasite.halt_reason if hasattr(self.parasite, 'halt_reason') else "Manual halt"}
+        elif action == "resume":
+            self.parasite.resume()
+            return {"status": "resumed"}
+        elif action == "close_all":
+            count = 0
+            for pos_id in list(self.parasite.execution.active_positions.keys()):
+                await self.parasite.execution._close_position(pos_id, 0)
+                count += 1
+            return {"status": "closed", "count": count}
+        elif action == "emergency":
+            self.parasite.halt("Emergency via API")
+            count = 0
+            for pos_id in list(self.parasite.execution.active_positions.keys()):
+                await self.parasite.execution._close_position(pos_id, 0)
+                count += 1
+            return {"status": "emergency_halted", "closed": count}
+        else:
+            return {"status": "error", "message": f"Unknown action: {action}"}
 
     def _register_routes(self):
         """Register all API routes."""
@@ -111,23 +135,16 @@ class MonitorAPI:
         async def get_nervous_system():
             return JSONResponse(parasite.nervous_system.get_stats())
 
+        # Control endpoints — supports both GET (browser) and POST (frontend)
+        @app.get("/api/control")
+        async def control_get(action: str = Query(...)):
+            """Browser-friendly GET control."""
+            return await self._handle_control(action)
+
         @app.post("/api/control")
-        async def control(action: str = Query(...)):
-            action = action.lower().strip()
-            if action == "halt":
-                parasite.halt("Manual halt via API")
-                return {"status": "halted"}
-            elif action == "resume":
-                parasite.resume()
-                return {"status": "resumed"}
-            elif action == "close_all":
-                count = 0
-                for pos_id in list(parasite.execution.active_positions.keys()):
-                    await parasite.execution._close_position(pos_id, 0)
-                    count += 1
-                return {"status": "closed", "count": count}
-            else:
-                return {"status": "error", "message": f"Unknown action: {action}"}
+        async def control_post(action: str = Query(...)):
+            """Frontend POST control."""
+            return await self._handle_control(action)
 
         @app.websocket("/ws")
         async def websocket_endpoint(websocket: WebSocket):

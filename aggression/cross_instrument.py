@@ -1,7 +1,6 @@
 """
 Cross-Instrument Arbitrage — Layer 5.
-Trades divergence between correlated volatility index pairs.
-Asymmetric exit: cuts losers early, lets winners run.
+Trades divergence between correlated pairs. Timeout-protected.
 """
 
 import asyncio
@@ -15,10 +14,7 @@ logger = get_logger("cross_instrument")
 
 
 class CrossInstrumentArb:
-    """
-    Detects divergence between paired instruments and trades convergence.
-    Asymmetric exit per leg for maximum profit.
-    """
+    """Detects divergence and trades convergence with timeout protection."""
 
     def __init__(self, parasite):
         self.parasite = parasite
@@ -31,7 +27,7 @@ class CrossInstrumentArb:
 
     async def run(self):
         self.running = True
-        logger.info("Cross-Instrument Arbitrage online (asymmetric exit)")
+        logger.info("Cross-Instrument Arbitrage online — TIMEOUT PROTECTED")
 
         for pair in config.CROSS_INSTRUMENT_PAIRS:
             self.spread_history[pair] = []
@@ -45,7 +41,7 @@ class CrossInstrumentArb:
                 for pair in config.CROSS_INSTRUMENT_PAIRS:
                     await self._check_pair(pair)
 
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(0.5)
 
             except Exception as e:
                 logger.error(f"Cross-instrument error: {e}")
@@ -75,7 +71,7 @@ class CrossInstrumentArb:
         if len(self.spread_history[pair]) > 200:
             self.spread_history[pair].pop(0)
 
-        if len(self.spread_history[pair]) < 50:
+        if len(self.spread_history[pair]) < 30:
             return
 
         spreads = np.array(self.spread_history[pair])
@@ -111,29 +107,22 @@ class CrossInstrumentArb:
         if not order_a or not order_b:
             return
 
-        # Get current prices for tracking
         buffer_a = self.parasite.nervous_system.tick_buffers.get(sym_a)
         buffer_b = self.parasite.nervous_system.tick_buffers.get(sym_b)
         entry_a = buffer_a[-1].bid if dir_a == "SELL" else buffer_a[-1].ask if buffer_a else 0
         entry_b = buffer_b[-1].ask if dir_b == "BUY" else buffer_b[-1].bid if buffer_b else 0
 
         self.active_pairs[pair_key] = {
-            "trade_id": trade_id,
-            "sym_a": sym_a, "sym_b": sym_b,
+            "trade_id": trade_id, "sym_a": sym_a, "sym_b": sym_b,
             "dir_a": dir_a, "dir_b": dir_b,
             "entry_a": entry_a, "entry_b": entry_b,
-            "risk_amount": risk_amount,
-            "opened_at": time.time(),
-            "z_score_entry": z_score,
-            "order_id_a": order_a.get("orderId", ""),
-            "order_id_b": order_b.get("orderId", ""),
-            "leg_a_closed": False,
-            "leg_b_closed": False,
+            "risk_amount": risk_amount, "opened_at": time.time(),
+            "leg_a_closed": False, "leg_b_closed": False,
             "r_a": 0.0, "r_b": 0.0,
         }
 
         asyncio.create_task(self._monitor_pair(pair_key))
-        logger.layer("cross_instrument", "ENTER", f"{sym_a}/{sym_b} z={z_score:.1f}")
+        logger.layer("cross_instrument", "ENTER", f"{sym_a}/{sym_b}")
 
     async def _monitor_pair(self, pair_key: str):
         position = self.active_pairs.get(pair_key)
@@ -141,9 +130,19 @@ class CrossInstrumentArb:
             return
 
         risk = position["risk_amount"]
+        start_time = time.time()
 
         while pair_key in self.active_pairs:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.3)
+
+            # Timeout protection
+            if time.time() - start_time > config.CROSS_INSTRUMENT_TIMEOUT:
+                pos = self.active_pairs.get(pair_key)
+                if pos:
+                    pos["leg_a_closed"] = True
+                    pos["leg_b_closed"] = True
+                await self._exit_pair(pair_key)
+                break
 
             pos = self.active_pairs.get(pair_key)
             if not pos:
@@ -171,61 +170,7 @@ class CrossInstrumentArb:
             else:
                 r_b = (pos["entry_b"] - exit_b) / (risk / 0.01) if risk > 0 else 0
 
-            # ASYMMETRIC EXIT
-            if not pos["leg_a_closed"] and r_a < -0.5:
+            if not pos["leg_a_closed"] and r_a < -0.4:
                 pos["leg_a_closed"] = True
                 pos["r_a"] = r_a
-
-            if not pos["leg_b_closed"] and r_b < -0.5:
-                pos["leg_b_closed"] = True
-                pos["r_b"] = r_b
-
-            if not pos["leg_a_closed"] and r_a > 1.0:
-                pos["leg_a_closed"] = True
-                pos["r_a"] = r_a
-
-            if not pos["leg_b_closed"] and r_b > 1.0:
-                pos["leg_b_closed"] = True
-                pos["r_b"] = r_b
-
-            if pos["leg_a_closed"] and pos["leg_b_closed"]:
-                await self._exit_pair(pair_key)
-                break
-
-    async def _exit_pair(self, pair_key: str):
-        position = self.active_pairs.pop(pair_key, None)
-        if not position:
-            return
-
-        combined_r = position["r_a"] + position["r_b"]
-        risk = position["risk_amount"]
-
-        trade_data = {
-            "trade_id": f"TRD_{position['trade_id']}",
-            "instrument": f"{position['sym_a']}/{position['sym_b']}",
-            "layer": "cross_instrument", "branch_id": "",
-            "direction": "PAIR",
-            "entry_price": (position["entry_a"] + position["entry_b"]) / 2,
-            "exit_price": 0,
-            "r_multiple": round(combined_r, 4),
-            "profit_currency": round(combined_r * risk, 4),
-            "duration_ms": int((time.time() - position["opened_at"]) * 1000),
-        }
-
-        await self.parasite.record_trade(trade_data)
-        self.total_trades += 1
-        if combined_r > 0:
-            self.total_wins += 1
-        self.total_r += combined_r
-
-        logger.trade("CLOSE", f"{position['sym_a']}/{position['sym_b']}", "cross_instrument", {"r": round(combined_r, 3)})
-
-    def get_stats(self) -> dict:
-        return {
-            "active": self.running,
-            "total_trades": self.total_trades,
-            "wins": self.total_wins,
-            "win_rate": self.total_wins / max(self.total_trades, 1),
-            "total_r": round(self.total_r, 2),
-            "avg_r": round(self.total_r / max(self.total_trades, 1), 3),
-        }
+            if not pos["leg_b

@@ -1,6 +1,6 @@
 """
-Execution Engine — Simulation mode for strategy testing.
-Uses fake order IDs. All strategy logic runs, but no real orders placed.
+Execution Engine — Places REAL orders via cTrader API.
+Asymmetric exit: cuts losers fast, lets winners run with pyramiding.
 """
 
 import asyncio
@@ -14,7 +14,7 @@ logger = get_logger("execution")
 
 
 class ExecutionEngine:
-    """Executes simulated trades for strategy validation."""
+    """Executes real trades on Pepperstone via cTrader."""
 
     def __init__(self, parasite):
         self.parasite = parasite
@@ -47,7 +47,9 @@ class ExecutionEngine:
 
             trade_id = f"TRD_{uuid.uuid4().hex[:8]}"
             try:
-                order_result = await self._place_order(symbol, direction, risk_amount)
+                order_result = await self.parasite.broker_client._place_order(
+                    symbol, direction, risk_amount
+                )
                 if not order_result:
                     return False
 
@@ -59,7 +61,6 @@ class ExecutionEngine:
                     "order_id": order_result.get("orderId", ""),
                 }
                 self.active_positions[trade_id] = position
-
                 asyncio.create_task(self._monitor_position(trade_id))
 
                 logger.trade("OPEN", symbol, layer, {
@@ -72,10 +73,6 @@ class ExecutionEngine:
                 logger.error(f"Order execution error: {e}")
                 return False
 
-    async def _place_order(self, symbol: str, direction: str, amount: float) -> Optional[dict]:
-        """Simulate order placement. Returns fake order ID for testing."""
-        return {"orderId": str(uuid.uuid4().hex[:8])}
-
     async def _monitor_position(self, trade_id: str):
         position = self.active_positions.get(trade_id)
         if not position:
@@ -87,7 +84,7 @@ class ExecutionEngine:
         risk = position["risk_amount"]
 
         while trade_id in self.active_positions:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.2)
 
             buffer = self.parasite.nervous_system.tick_buffers.get(symbol)
             if not buffer or len(buffer) < 2:
@@ -100,11 +97,13 @@ class ExecutionEngine:
             else:
                 r_multiple = (entry - current_price) / (risk / 0.01) if risk > 0 else 0
 
-            if r_multiple < -0.7:
+            # Cut loss at -0.5R (tighter than before)
+            if r_multiple < -0.5:
                 await self._close_position(trade_id, current_price)
                 break
 
-            if r_multiple > 1.5:
+            # Take profit at +2.0R (let winners run longer)
+            if r_multiple > 2.0:
                 await self._close_position(trade_id, current_price)
                 break
 

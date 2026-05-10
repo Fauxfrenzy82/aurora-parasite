@@ -1,6 +1,6 @@
 """
 Fade Engine — Layer 3.
-Fades panic spikes by placing limit orders into the spike.
+Fades panic spikes. Independent of cortex.
 """
 
 import asyncio
@@ -25,7 +25,7 @@ class FadeEngine:
 
     async def run(self):
         self.running = True
-        logger.info("Fade Engine online")
+        logger.info("Fade Engine online — INDEPENDENT MODE")
 
         while self.running:
             try:
@@ -36,25 +36,22 @@ class FadeEngine:
                 for symbol in config.INSTRUMENTS:
                     await self._check_symbol(symbol)
 
-                await asyncio.sleep(0.4)
+                await asyncio.sleep(0.15)
 
             except Exception as e:
                 logger.error(f"Fade engine error: {e}")
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.5)
 
     async def _check_symbol(self, symbol: str):
-        if symbol in self.active_fades:
-            return
-
         buffer = self.parasite.nervous_system.tick_buffers.get(symbol)
-        if not buffer or len(buffer) < 10:
+        if not buffer or len(buffer) < 8:
             return
 
         latest = buffer[-1]
 
-        if latest.tick_velocity < 12.0:
+        if latest.tick_velocity < config.FADE_VELOCITY_SPIKE:
             return
-        if latest.spread_ratio < 1.2:
+        if latest.spread_ratio < config.FADE_SPREAD_RATIO:
             return
         if latest.price_jump < config.FADE_PRICE_JUMP:
             return
@@ -79,50 +76,53 @@ class FadeEngine:
         if not order:
             return
 
-        self.active_fades[symbol] = {
+        self.active_fades[trade_id] = {
             "trade_id": trade_id, "symbol": symbol, "direction": direction,
             "entry_price": tick.ask if direction == "BUY" else tick.bid,
             "risk_amount": risk_amount, "opened_at": time.time(),
             "order_id": order.get("orderId", ""),
         }
 
-        asyncio.create_task(self._monitor_fade(symbol))
+        asyncio.create_task(self._monitor_fade(trade_id))
         logger.layer("fade_engine", "ENTER", f"{symbol} {direction}")
 
-    async def _monitor_fade(self, symbol: str):
-        position = self.active_fades.get(symbol)
+    async def _monitor_fade(self, trade_id: str):
+        position = self.active_fades.get(trade_id)
         if not position:
             return
 
-        entry_price = position["entry_price"]
+        symbol = position["symbol"]
         direction = position["direction"]
+        entry_price = position["entry_price"]
+        risk = position["risk_amount"]
 
-        while symbol in self.active_fades:
-            await asyncio.sleep(0.3)
+        while trade_id in self.active_fades:
+            await asyncio.sleep(0.15)
 
             buffer = self.parasite.nervous_system.tick_buffers.get(symbol)
             if not buffer or len(buffer) < 2:
                 continue
 
             current_mid = buffer[-1].mid_price
-            risk = position["risk_amount"]
 
+            # Profit on reversion
             if direction == "SELL" and current_mid <= entry_price:
-                await self._exit_fade(symbol, current_mid)
+                await self._exit_fade(trade_id, current_mid)
                 break
             if direction == "BUY" and current_mid >= entry_price:
-                await self._exit_fade(symbol, current_mid)
+                await self._exit_fade(trade_id, current_mid)
                 break
 
-            if direction == "SELL" and current_mid > entry_price + (risk / 0.01) * 1.5:
-                await self._exit_fade(symbol, current_mid)
+            # Stop loss
+            if direction == "SELL" and current_mid > entry_price + (risk / 0.01) * 1.2:
+                await self._exit_fade(trade_id, current_mid)
                 break
-            if direction == "BUY" and current_mid < entry_price - (risk / 0.01) * 1.5:
-                await self._exit_fade(symbol, current_mid)
+            if direction == "BUY" and current_mid < entry_price - (risk / 0.01) * 1.2:
+                await self._exit_fade(trade_id, current_mid)
                 break
 
-    async def _exit_fade(self, symbol: str, exit_price: float):
-        position = self.active_fades.pop(symbol, None)
+    async def _exit_fade(self, trade_id: str, exit_price: float):
+        position = self.active_fades.pop(trade_id, None)
         if not position:
             return
 
@@ -137,7 +137,7 @@ class FadeEngine:
 
         trade_data = {
             "trade_id": f"TRD_{position['trade_id']}",
-            "instrument": symbol, "layer": "fade_engine", "branch_id": "",
+            "instrument": position["symbol"], "layer": "fade_engine", "branch_id": "",
             "direction": direction, "entry_price": entry, "exit_price": exit_price,
             "r_multiple": round(r_multiple, 4),
             "profit_currency": round(r_multiple * risk, 4),
@@ -150,7 +150,7 @@ class FadeEngine:
             self.total_wins += 1
         self.total_r += r_multiple
 
-        logger.trade("CLOSE", symbol, "fade_engine", {"r": round(r_multiple, 3)})
+        logger.trade("CLOSE", position["symbol"], "fade_engine", {"r": round(r_multiple, 3)})
 
     def get_stats(self) -> dict:
         return {

@@ -1,6 +1,6 @@
 """
 Tick Momentum Engine — Layer 2.
-Surfs micro-trends detected through consecutive directional ticks.
+Surfs micro-trends. No cortex dependency. Fires independently.
 """
 
 import asyncio
@@ -25,7 +25,7 @@ class TickMomentum:
 
     async def run(self):
         self.running = True
-        logger.info("Tick Momentum Engine online")
+        logger.info("Tick Momentum Engine online — INDEPENDENT MODE")
 
         while self.running:
             try:
@@ -36,25 +36,25 @@ class TickMomentum:
                 for symbol in config.INSTRUMENTS:
                     await self._check_symbol(symbol)
 
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(0.1)
 
             except Exception as e:
                 logger.error(f"Tick momentum error: {e}")
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.5)
 
     async def _check_symbol(self, symbol: str):
         if symbol in self.active_trends:
             return
 
         buffer = self.parasite.nervous_system.tick_buffers.get(symbol)
-        if not buffer or len(buffer) < 10:
+        if not buffer or len(buffer) < 8:
             return
 
         latest = buffer[-1]
 
-        if latest.tick_velocity < 6.0:
+        if latest.tick_velocity < config.TICK_MOMENTUM_MIN_VELOCITY:
             return
-        if latest.spread_ratio > 1.3:
+        if latest.spread_ratio > config.TICK_MOMENTUM_MAX_SPREAD:
             return
 
         direction = latest.direction
@@ -68,7 +68,7 @@ class TickMomentum:
             else:
                 break
 
-        if consecutive < 3:
+        if consecutive < config.TICK_MOMENTUM_CONSECUTIVE_TICKS:
             return
 
         await self._enter_trend(symbol, direction, latest)
@@ -84,7 +84,7 @@ class TickMomentum:
         if not order:
             return
 
-        self.active_trends[symbol] = {
+        self.active_trends[trade_id] = {
             "trade_id": trade_id, "symbol": symbol, "direction": dir_str,
             "entry_price": tick.ask if direction == 1 else tick.bid,
             "risk_amount": risk_amount,
@@ -92,36 +92,41 @@ class TickMomentum:
             "opened_at": time.time(), "order_id": order.get("orderId", ""),
         }
 
-        asyncio.create_task(self._monitor_trend(symbol))
+        asyncio.create_task(self._monitor_trend(trade_id))
         logger.layer("tick_momentum", "ENTER", f"{symbol} {dir_str}")
 
-    async def _monitor_trend(self, symbol: str):
-        position = self.active_trends.get(symbol)
+    async def _monitor_trend(self, trade_id: str):
+        position = self.active_trends.get(trade_id)
         if not position:
             return
 
-        while symbol in self.active_trends:
-            await asyncio.sleep(0.2)
+        symbol = position["symbol"]
+        direction = position["direction"]
+        entry = position["entry_price"]
+        risk = position["risk_amount"]
+
+        while trade_id in self.active_trends:
+            await asyncio.sleep(0.1)
 
             buffer = self.parasite.nervous_system.tick_buffers.get(symbol)
             if not buffer or len(buffer) < 2:
                 continue
 
             latest = buffer[-1]
-            pos = self.active_trends.get(symbol)
+            pos = self.active_trends.get(trade_id)
             if not pos:
                 break
 
-            direction = pos["direction"]
-
+            # Reversal exit
             if (direction == "BUY" and latest.direction == -1) or (direction == "SELL" and latest.direction == 1):
                 exit_price = latest.bid if direction == "BUY" else latest.ask
-                await self._exit_trend(symbol, exit_price)
+                await self._exit_trend(trade_id, exit_price)
                 break
 
+            # Pyramiding
             if latest.direction == (1 if direction == "BUY" else -1):
                 pos["consecutive_count"] += 1
-                if pos["consecutive_count"] >= 3 and pos["pyramid_level"] < 4:
+                if pos["consecutive_count"] >= 2 and pos["pyramid_level"] < 3:
                     add_size = pos["risk_amount"] * 0.5
                     await self.parasite.execution._place_order(symbol, direction, add_size)
                     pos["pyramid_level"] += 1
@@ -129,8 +134,22 @@ class TickMomentum:
             else:
                 pos["consecutive_count"] = 0
 
-    async def _exit_trend(self, symbol: str, exit_price: float):
-        position = self.active_trends.pop(symbol, None)
+            # R-based exit
+            current_price = latest.bid if direction == "BUY" else latest.ask
+            if direction == "BUY":
+                r_multiple = (current_price - entry) / (risk / 0.01) if risk > 0 else 0
+            else:
+                r_multiple = (entry - current_price) / (risk / 0.01) if risk > 0 else 0
+
+            if r_multiple < -0.5:
+                await self._exit_trend(trade_id, current_price)
+                break
+            if r_multiple > 2.0:
+                await self._exit_trend(trade_id, current_price)
+                break
+
+    async def _exit_trend(self, trade_id: str, exit_price: float):
+        position = self.active_trends.pop(trade_id, None)
         if not position:
             return
 
@@ -145,7 +164,7 @@ class TickMomentum:
 
         trade_data = {
             "trade_id": f"TRD_{position['trade_id']}",
-            "instrument": symbol, "layer": "tick_momentum", "branch_id": "",
+            "instrument": position["symbol"], "layer": "tick_momentum", "branch_id": "",
             "direction": direction, "entry_price": entry, "exit_price": exit_price,
             "r_multiple": round(r_multiple, 4),
             "profit_currency": round(r_multiple * risk, 4),
@@ -158,7 +177,7 @@ class TickMomentum:
             self.total_wins += 1
         self.total_r += r_multiple
 
-        logger.trade("CLOSE", symbol, "tick_momentum", {"r": round(r_multiple, 3)})
+        logger.trade("CLOSE", position["symbol"], "tick_momentum", {"r": round(r_multiple, 3)})
 
     def get_stats(self) -> dict:
         return {

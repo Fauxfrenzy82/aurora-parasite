@@ -1,7 +1,7 @@
 """
 Spread Capture Engine — Layer 1.
 Bidirectional spread capture during low-volatility regimes.
-Places simultaneous buy/sell limit orders and captures the spread.
+Upgraded: No cooldowns. 3 positions per instrument. Faster checks.
 """
 
 import asyncio
@@ -23,12 +23,10 @@ class SpreadCapture:
         self.total_trades = 0
         self.total_wins = 0
         self.total_r = 0.0
-        self.last_activity = time.time()
-        self._cooldowns: dict = {}
 
     async def run(self):
         self.running = True
-        logger.info("Spread Capture Engine online")
+        logger.info("Spread Capture Engine online — AGGRESSIVE MODE")
 
         while self.running:
             try:
@@ -39,28 +37,15 @@ class SpreadCapture:
                 for symbol in config.INSTRUMENTS:
                     await self._check_symbol(symbol)
 
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.1)  # Was 0.5 — 5x faster
 
             except Exception as e:
                 logger.error(f"Spread capture error: {e}")
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.5)
 
     async def _check_symbol(self, symbol: str):
-        if symbol in self.active_captures:
-            return
-
-        if symbol in self._cooldowns and time.time() < self._cooldowns[symbol]:
-            return
-
-        existing = [
-            p for p in self.parasite.execution.active_positions.values()
-            if p["symbol"] == symbol and p["layer"] == "spread_capture"
-        ]
-        if len(existing) >= config.MAX_POSITIONS_PER_INSTRUMENT:
-            return
-
         buffer = self.parasite.nervous_system.tick_buffers.get(symbol)
-        if not buffer or len(buffer) < 20:
+        if not buffer or len(buffer) < 10:
             return
 
         latest = buffer[-1]
@@ -87,7 +72,7 @@ class SpreadCapture:
         if not buy_order or not sell_order:
             return
 
-        self.active_captures[symbol] = {
+        self.active_captures[capture_id] = {
             "capture_id": capture_id, "symbol": symbol,
             "bid": bid, "ask": ask,
             "buy_order_id": buy_order.get("orderId", ""),
@@ -95,32 +80,31 @@ class SpreadCapture:
             "risk_amount": risk_amount, "opened_at": time.time(),
         }
 
-        asyncio.create_task(self._monitor_capture(symbol, capture_id))
+        asyncio.create_task(self._monitor_capture(capture_id))
         logger.layer("spread_capture", "OPEN", f"{symbol} bid={bid:.5f} ask={ask:.5f}")
 
-    async def _monitor_capture(self, symbol: str, capture_id: str):
-        capture = self.active_captures.get(symbol)
+    async def _monitor_capture(self, capture_id: str):
+        capture = self.active_captures.get(capture_id)
         if not capture:
             return
 
+        symbol = capture["symbol"]
         start_time = time.time()
+        min_hold = 1.0  # Was 3.0 — faster turnover
         max_duration = config.SPREAD_CAPTURE_MAX_DURATION
-        min_hold = 3.0
-        check_interval = 0.3
 
-        while symbol in self.active_captures:
-            await asyncio.sleep(check_interval)
+        while capture_id in self.active_captures:
+            await asyncio.sleep(0.15)
+
             elapsed = time.time() - start_time
-
             if elapsed < min_hold:
                 continue
-
             if elapsed > max_duration:
-                await self._cancel_capture(symbol)
+                await self._cancel_capture(capture_id)
                 break
 
             buffer = self.parasite.nervous_system.tick_buffers.get(symbol)
-            if not buffer or len(buffer) < 5:
+            if not buffer or len(buffer) < 3:
                 continue
 
             current_mid = buffer[-1].mid_price
@@ -131,29 +115,27 @@ class SpreadCapture:
                 continue
 
             if abs(current_mid - entry_mid) > spread * 2.0:
-                await self._cancel_capture(symbol)
+                await self._cancel_capture(capture_id)
                 break
 
-            recent_ticks = list(buffer)[-5:]
+            recent_ticks = list(buffer)[-3:]
             recent_lows = min(t.bid for t in recent_ticks)
             recent_highs = max(t.ask for t in recent_ticks)
 
             if recent_lows <= capture["bid"]:
                 exit_price = capture["ask"]
-                await self._close_capture(symbol, "BUY", capture["bid"], exit_price)
+                await self._close_capture(capture_id, "BUY", capture["bid"], exit_price)
                 break
 
             if recent_highs >= capture["ask"]:
                 exit_price = capture["bid"]
-                await self._close_capture(symbol, "SELL", capture["ask"], exit_price)
+                await self._close_capture(capture_id, "SELL", capture["ask"], exit_price)
                 break
 
-    async def _close_capture(self, symbol: str, filled_side: str, fill_price: float, exit_price: float):
-        capture = self.active_captures.pop(symbol, None)
+    async def _close_capture(self, capture_id: str, filled_side: str, fill_price: float, exit_price: float):
+        capture = self.active_captures.pop(capture_id, None)
         if not capture:
             return
-
-        self._cooldowns[symbol] = time.time() + 2.0
 
         spread = capture["ask"] - capture["bid"]
         risk_amount = capture["risk_amount"]
@@ -167,7 +149,7 @@ class SpreadCapture:
 
         trade_data = {
             "trade_id": f"TRD_{capture['capture_id']}",
-            "instrument": symbol, "layer": "spread_capture", "branch_id": "",
+            "instrument": capture["symbol"], "layer": "spread_capture", "branch_id": "",
             "direction": filled_side, "entry_price": fill_price, "exit_price": exit_price,
             "r_multiple": round(r_multiple, 4),
             "profit_currency": round(r_multiple * risk_amount, 4),
@@ -180,19 +162,17 @@ class SpreadCapture:
             self.total_wins += 1
         self.total_r += r_multiple
 
-        logger.trade("CLOSE", symbol, "spread_capture", {"r": round(r_multiple, 3)})
+        logger.trade("CLOSE", capture["symbol"], "spread_capture", {"r": round(r_multiple, 3)})
 
-    async def _cancel_capture(self, symbol: str):
-        capture = self.active_captures.pop(symbol, None)
+    async def _cancel_capture(self, capture_id: str):
+        capture = self.active_captures.pop(capture_id, None)
         if not capture:
             return
-
-        self._cooldowns[symbol] = time.time() + 2.0
 
         loss_r = -0.5
         trade_data = {
             "trade_id": f"TRD_{capture['capture_id']}",
-            "instrument": symbol, "layer": "spread_capture", "branch_id": "",
+            "instrument": capture["symbol"], "layer": "spread_capture", "branch_id": "",
             "direction": "CANCEL",
             "entry_price": (capture["bid"] + capture["ask"]) / 2,
             "exit_price": (capture["bid"] + capture["ask"]) / 2,

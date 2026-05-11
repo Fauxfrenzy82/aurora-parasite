@@ -14,8 +14,6 @@ logger = get_logger("cross_instrument")
 
 
 class CrossInstrumentArb:
-    """Detects divergence and trades convergence with timeout protection."""
-
     def __init__(self, parasite):
         self.parasite = parasite
         self.running = False
@@ -113,12 +111,19 @@ class CrossInstrumentArb:
         entry_b = buffer_b[-1].ask if dir_b == "BUY" else buffer_b[-1].bid if buffer_b else 0
 
         self.active_pairs[pair_key] = {
-            "trade_id": trade_id, "sym_a": sym_a, "sym_b": sym_b,
-            "dir_a": dir_a, "dir_b": dir_b,
-            "entry_a": entry_a, "entry_b": entry_b,
-            "risk_amount": risk_amount, "opened_at": time.time(),
-            "leg_a_closed": False, "leg_b_closed": False,
-            "r_a": 0.0, "r_b": 0.0,
+            "trade_id": trade_id,
+            "sym_a": sym_a,
+            "sym_b": sym_b,
+            "dir_a": dir_a,
+            "dir_b": dir_b,
+            "entry_a": entry_a,
+            "entry_b": entry_b,
+            "risk_amount": risk_amount,
+            "opened_at": time.time(),
+            "leg_a_closed": False,
+            "leg_b_closed": False,
+            "r_a": 0.0,
+            "r_b": 0.0,
         }
 
         asyncio.create_task(self._monitor_pair(pair_key))
@@ -135,7 +140,7 @@ class CrossInstrumentArb:
         while pair_key in self.active_pairs:
             await asyncio.sleep(0.3)
 
-            # Timeout protection
+            # Force close after timeout
             if time.time() - start_time > config.CROSS_INSTRUMENT_TIMEOUT:
                 pos = self.active_pairs.get(pair_key)
                 if pos:
@@ -173,4 +178,58 @@ class CrossInstrumentArb:
             if not pos["leg_a_closed"] and r_a < -0.4:
                 pos["leg_a_closed"] = True
                 pos["r_a"] = r_a
-            if not pos["leg_b
+
+            if not pos["leg_b_closed"] and r_b < -0.4:
+                pos["leg_b_closed"] = True
+                pos["r_b"] = r_b
+
+            combined_r = r_a + r_b
+            if combined_r > 1.5 or (pos["leg_a_closed"] and pos["leg_b_closed"]):
+                pos["r_a"] = r_a
+                pos["r_b"] = r_b
+                await self._exit_pair(pair_key)
+                break
+
+    async def _exit_pair(self, pair_key: str):
+        position = self.active_pairs.pop(pair_key, None)
+        if not position:
+            return
+
+        combined_r = position["r_a"] + position["r_b"]
+        risk = position["risk_amount"]
+
+        trade_data = {
+            "trade_id": f"TRD_{position['trade_id']}",
+            "instrument": f"{position['sym_a']}/{position['sym_b']}",
+            "layer": "cross_instrument",
+            "branch_id": "",
+            "direction": "PAIR",
+            "entry_price": position["entry_a"],
+            "exit_price": 0,
+            "r_multiple": round(combined_r, 4),
+            "profit_currency": round(combined_r * risk, 4),
+            "duration_ms": int((time.time() - position["opened_at"]) * 1000),
+        }
+
+        await self.parasite.record_trade(trade_data)
+        self.total_trades += 1
+        if combined_r > 0:
+            self.total_wins += 1
+        self.total_r += combined_r
+
+        logger.trade(
+            "CLOSE",
+            f"{position['sym_a']}/{position['sym_b']}",
+            "cross_instrument",
+            {"r": round(combined_r, 3)},
+        )
+
+    def get_stats(self) -> dict:
+        return {
+            "active": self.running,
+            "total_trades": self.total_trades,
+            "wins": self.total_wins,
+            "win_rate": self.total_wins / max(self.total_trades, 1),
+            "total_r": round(self.total_r, 2),
+            "avg_r": round(self.total_r / max(self.total_trades, 1), 3),
+        }

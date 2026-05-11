@@ -1,7 +1,6 @@
 """
 Aurora Parasite — Central Configuration.
-Upgraded for Pepperstone cTrader.
-No artificial limits. No cooldowns. Maximum frequency.
+Pepperstone cTrader Edition.
 """
 
 import os
@@ -16,7 +15,7 @@ class Config:
     CTRADER_CLIENT_ID: str = os.getenv("CTRADER_CLIENT_ID", "")
     CTRADER_CLIENT_SECRET: str = os.getenv("CTRADER_CLIENT_SECRET", "")
     CTRADER_ACCOUNT_ID: str = os.getenv("CTRADER_ACCOUNT_ID", "")
-    CTRADER_ENV: str = os.getenv("CTRADER_ENV", "demo")  # demo or live
+    CTRADER_ENV: str = os.getenv("CTRADER_ENV", "demo")
 
     # ── Supabase ─────────────────────────────────────
     SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")
@@ -25,11 +24,12 @@ class Config:
     # ── Account ──────────────────────────────────────
     ACCOUNT_TYPE: str = os.getenv("ACCOUNT_TYPE", "DEMO")
     INITIAL_CAPITAL: float = float(os.getenv("INITIAL_CAPITAL", "500.0"))
+    BALANCE_CAP: float = float(os.getenv("BALANCE_CAP", "1000000.0"))
 
-    # ── Risk (Aggressive — No Limits) ────────────────
+    # ── Risk ─────────────────────────────────────────
     MAX_DRAWDOWN_PCT: float = 0.40
     MAX_EXPOSURE_PCT: float = 0.80
-    MAX_POSITIONS_PER_INSTRUMENT: int = 3  # Was 1, now allows pyramiding
+    MAX_POSITIONS_PER_INSTRUMENT: int = 3
     BASE_RISK_PCT: float = 0.02
     KELLY_FRACTION: float = 0.5
     HARD_STOP_DRAWDOWN: float = 0.40
@@ -43,7 +43,7 @@ class Config:
         "cross_instrument": 0.004,
     }
 
-    # ── Pepperstone Forex Instruments ────────────────
+    # ── Instruments ──────────────────────────────────
     INSTRUMENTS: List[str] = [
         "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD",
         "EURGBP", "EURJPY", "GBPJPY", "EURCHF", "GBPCHF", "AUDJPY", "NZDJPY",
@@ -57,7 +57,6 @@ class Config:
         "USDJPY", "EURJPY", "GBPJPY", "AUDJPY", "NZDJPY", "CHFJPY", "CADJPY"
     ]
 
-    # ── CROSS_INSTRUMENT PAIRS ───────────────────────
     CROSS_INSTRUMENT_PAIRS: List[tuple] = [
         ("EURUSD", "GBPUSD"),
         ("AUDUSD", "NZDUSD"),
@@ -68,22 +67,22 @@ class Config:
 
     # ── Nervous System ───────────────────────────────
     TICK_WINDOW: int = 200
-    VELOCITY_WINDOW: float = 3.0  # Was 5.0, faster detection
-    SPREAD_WINDOW: int = 30       # Was 50
-    JUMP_THRESHOLD: float = 0.0002  # Was 0.0003
+    VELOCITY_WINDOW: float = 3.0
+    SPREAD_WINDOW: int = 30
+    JUMP_THRESHOLD: float = 0.0002
 
     # ── Neural Cortex ────────────────────────────────
-    MIN_TEST_TRADES: int = 3      # Was 10, faster promotion
-    PROMOTION_WIN_RATE: float = 0.50  # Was 0.52
-    KILL_WIN_RATE: float = 0.40   # Was 0.45
+    MIN_TEST_TRADES: int = 3
+    PROMOTION_WIN_RATE: float = 0.50
+    KILL_WIN_RATE: float = 0.40
     CONFIDENCE_DECAY: float = 0.05
     CONFIDENCE_BOOST: float = 0.05
-    MAX_BRANCHES: int = 500       # Was 200
-    BRANCH_SCAN_INTERVAL: int = 30  # Was 60, scan twice as often
-    PERMANENT_LAW_TRADES: int = 200  # Was 500
-    PERMANENT_LAW_SHARPE: float = 1.0  # Was 1.5
+    MAX_BRANCHES: int = 500
+    BRANCH_SCAN_INTERVAL: int = 30
+    PERMANENT_LAW_TRADES: int = 200
+    PERMANENT_LAW_SHARPE: float = 1.0
 
-    # ── Execution Engine ─────────────────────────────
+    # ── Execution ────────────────────────────────────
     PYRAMID_LEVELS: List[Dict] = [
         {"r_trigger": 0.3, "size_ratio": 0.4, "stop_move": 0.0},
         {"r_trigger": 0.7, "size_ratio": 0.3, "stop_move": 0.3},
@@ -91,44 +90,48 @@ class Config:
     ]
     MAX_COMBINED_SIZE: float = 1.9
 
-    # ── Aggression Layers ────────────────────────────
+    # ── Layer Thresholds ─────────────────────────────
     SPREAD_CAPTURE_MAX_VELOCITY: float = 8.0
-    SPREAD_CAPTURE_SPREAD_RATIO: float = 1.2  # Was 1.3
-    SPREAD_CAPTURE_MAX_DURATION: float = 15.0  # Was 30, faster turnover
+    SPREAD_CAPTURE_SPREAD_RATIO: float = 1.2
+    SPREAD_CAPTURE_MAX_DURATION: float = 15.0
 
-    TICK_MOMENTUM_MIN_VELOCITY: float = 4.0    # Was 6.0
-    TICK_MOMENTUM_MAX_SPREAD: float = 1.4      # Was 1.3
-    TICK_MOMENTUM_CONSECUTIVE_TICKS: int = 2   # Was 3
+    TICK_MOMENTUM_MIN_VELOCITY: float = 4.0
+    TICK_MOMENTUM_MAX_SPREAD: float = 1.4
+    TICK_MOMENTUM_CONSECUTIVE_TICKS: int = 2
 
-    FADE_VELOCITY_SPIKE: float = 8.0            # Was 12.0
-    FADE_SPREAD_RATIO: float = 1.1              # Was 1.2
-    FADE_PRICE_JUMP: float = 0.00015            # Was 0.0003
+    FADE_VELOCITY_SPIKE: float = 8.0
+    FADE_SPREAD_RATIO: float = 1.1
+    FADE_PRICE_JUMP: float = 0.00015
 
-    NEWS_VELOCITY_SPIKE: float = 10.0           # Was 15.0
-    NEWS_SIMULTANEOUS_INSTRUMENTS: int = 2       # Was 2
+    NEWS_VELOCITY_SPIKE: float = 10.0
+    NEWS_SIMULTANEOUS_INSTRUMENTS: int = 2
 
-    CROSS_INSTRUMENT_STD_THRESHOLD: float = 1.2  # Was 1.5, tighter triggers
-    CROSS_INSTRUMENT_TIMEOUT: float = 120.0      # New: force-close after 2 min
+    CROSS_INSTRUMENT_STD_THRESHOLD: float = 1.2
+    CROSS_INSTRUMENT_TIMEOUT: float = 120.0
 
     # ── Dynamic Exposure ─────────────────────────────
-    LOW_VOL_EXPOSURE: float = 0.80               # Was 0.70
-    NORMAL_VOL_EXPOSURE: float = 0.65            # Was 0.55
-    HIGH_VOL_EXPOSURE: float = 0.40              # Was 0.30
-    EXTREME_VOL_EXPOSURE: float = 0.20           # Was 0.15
-    EXPOSURE_UPDATE_INTERVAL: int = 300          # New: 5 minutes, was hourly
+    LOW_VOL_EXPOSURE: float = 0.80
+    NORMAL_VOL_EXPOSURE: float = 0.65
+    HIGH_VOL_EXPOSURE: float = 0.40
+    EXTREME_VOL_EXPOSURE: float = 0.20
+    EXPOSURE_UPDATE_INTERVAL: int = 300
 
     # ── System ───────────────────────────────────────
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     API_PORT: int = int(os.getenv("API_PORT", "8000"))
-    EVOLUTION_INTERVAL: int = 1800  # 30 minutes, was 3600
+    EVOLUTION_INTERVAL: int = 1800
     PERSIST_INTERVAL: int = 300
-    PRIMING_HOURS: int = 4          # Less priming, more live learning
-    BALANCE_CAP: float = float(os.getenv("BALANCE_CAP", "1000000.0"))
+    PRIMING_HOURS: int = 4
 
     @classmethod
     def validate(cls) -> bool:
-        required = ["CTRADER_CLIENT_ID", "CTRADER_CLIENT_SECRET", "CTRADER_ACCOUNT_ID",
-                   "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]
+        required = [
+            "CTRADER_CLIENT_ID",
+            "CTRADER_CLIENT_SECRET",
+            "CTRADER_ACCOUNT_ID",
+            "SUPABASE_URL",
+            "SUPABASE_SERVICE_ROLE_KEY",
+        ]
         missing = [k for k in required if not getattr(cls, k)]
         if missing:
             raise ValueError(f"Missing config: {', '.join(missing)}")

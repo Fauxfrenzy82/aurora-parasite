@@ -2,6 +2,7 @@
 Neural Cortex — Self-modifying decision tree.
 HIGH-SPEED: Branches go live instantly. Learn from real trades, not priming.
 Fuzzy matching for nearest-neighbor branch selection.
+No scipy dependency — pure numpy.
 """
 
 import asyncio
@@ -10,7 +11,6 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 from collections import defaultdict
 import numpy as np
-from scipy import stats
 
 from config import config
 from logger import get_logger
@@ -33,11 +33,11 @@ class DecisionBranch:
     win_rate: float = 0.0
     sharpe: float = 0.0
     confidence: float = 0.5
-    status: str = "PROMOTED"  # All branches start PROMOTED
+    status: str = "PROMOTED"
     last_tested: float = 0.0
     r_history: List[float] = field(default_factory=list)
     feature_name: str = ""
-    half_life: float = 1800.0  # 30 minutes
+    half_life: float = 1800.0
 
 
 class NeuralCortex:
@@ -67,7 +67,6 @@ class NeuralCortex:
         if len(self.signal_history[symbol]) > self.max_history:
             self.signal_history[symbol].pop(0)
 
-        # Find the CLOSEST matching branch, not exact match
         best_branch = None
         best_distance = float('inf')
 
@@ -76,12 +75,11 @@ class NeuralCortex:
                 continue
 
             feature_val = signal.features[branch.feature_index]
-            # Distance from threshold
             distance = abs(feature_val - branch.threshold)
-            # Weight by confidence
             weighted_distance = distance / max(branch.confidence, 0.1)
 
-            if weighted_distance < best_distance and feature_val * branch.direction > branch.threshold * branch.direction * 0.7:
+            if (weighted_distance < best_distance and
+                    feature_val * branch.direction > branch.threshold * branch.direction * 0.7):
                 best_distance = weighted_distance
                 best_branch = branch
 
@@ -123,7 +121,6 @@ class NeuralCortex:
             r_array = np.array(branch.r_history)
             branch.sharpe = np.mean(r_array) / (np.std(r_array) + 1e-10)
 
-        # Fast kill
         if len(branch.r_history) >= 5 and all(r <= 0 for r in branch.r_history[-3:]):
             branch.status = "KILLED"
             logger.info(f"Branch FAST-KILLED: {branch_id} (3 consecutive losses)")
@@ -131,13 +128,13 @@ class NeuralCortex:
         if branch.confidence < 0.20:
             branch.status = "KILLED"
 
-    def create_branch(self, symbol: str, feature_index: int, threshold: float, direction: int) -> Optional[str]:
+    def create_branch(
+        self, symbol: str, feature_index: int, threshold: float, direction: int
+    ) -> Optional[str]:
         if len(self.branches) >= config.MAX_BRANCHES:
-            worst = min(
-                [b for b in self.branches.values() if b.status == "PROMOTED"],
-                key=lambda b: b.confidence, default=None
-            )
-            if worst:
+            promoted = [b for b in self.branches.values() if b.status == "PROMOTED"]
+            if promoted:
+                worst = min(promoted, key=lambda b: b.confidence)
                 del self.branches[worst.branch_id]
             else:
                 return None
@@ -145,11 +142,20 @@ class NeuralCortex:
         self.branch_counter += 1
         branch_id = f"BR_{symbol}_{self.branch_counter:05d}"
         self.branches[branch_id] = DecisionBranch(
-            branch_id=branch_id, symbol=symbol, feature_index=feature_index,
-            threshold=threshold, direction=direction, created_at=time.time(),
+            branch_id=branch_id,
+            symbol=symbol,
+            feature_index=feature_index,
+            threshold=threshold,
+            direction=direction,
+            created_at=time.time(),
             feature_name=self.FEATURE_NAMES[feature_index],
-            trades=0, wins=0, total_r=0.0, avg_r=0.0,
-            win_rate=0.5, confidence=0.50, status="PROMOTED",
+            trades=0,
+            wins=0,
+            total_r=0.0,
+            avg_r=0.0,
+            win_rate=0.5,
+            confidence=0.50,
+            status="PROMOTED",
             last_tested=time.time(),
         )
         logger.info(f"Branch CREATED: {branch_id} [{self.FEATURE_NAMES[feature_index]}]")
@@ -159,7 +165,8 @@ class NeuralCortex:
         now = time.time()
         for branch in list(self.branches.values()):
             if branch.status == "KILLED":
-                del self.branches[branch.branch_id]
+                if branch.branch_id in self.branches:
+                    del self.branches[branch.branch_id]
                 continue
 
             hours_since_test = (now - branch.last_tested) / 3600
@@ -170,19 +177,25 @@ class NeuralCortex:
                 branch.status = "KILLED"
 
     def scan_for_patterns(self):
+        """Scan signal history for statistically significant patterns.
+        Pure numpy implementation — no scipy required."""
         for symbol in list(self.signal_history.keys()):
             signals = self.signal_history[symbol]
             if len(signals) < 20:
                 continue
 
             for feat_idx in range(12):
-                existing = [b for b in self.branches.values()
-                           if b.symbol == symbol and b.feature_index == feat_idx]
+                existing = [
+                    b for b in self.branches.values()
+                    if b.symbol == symbol and b.feature_index == feat_idx
+                ]
                 if len(existing) >= 5:
                     continue
 
                 feature_vals = np.array([s.features[feat_idx] for s in signals[:-1]])
-                future_moves = np.array([signals[i+1].features[4] for i in range(len(signals)-1)])
+                future_moves = np.array([
+                    signals[i + 1].features[4] for i in range(len(signals) - 1)
+                ])
 
                 if len(feature_vals) < 10:
                     continue
@@ -191,11 +204,17 @@ class NeuralCortex:
                 above = future_moves[feature_vals > threshold]
                 below = future_moves[feature_vals <= threshold]
 
-                if len(above) >= 5 and len(below) >= 5:
-                    t_stat, p_value = stats.ttest_ind(above, below)
-                    if p_value < 0.20:
-                        direction = 1 if np.mean(above) > np.mean(below) else -1
-                        self.create_branch(symbol, feat_idx, threshold, direction)
+                if len(above) < 5 or len(below) < 5:
+                    continue
+
+                # Pure numpy t-statistic — no scipy
+                mean_diff = abs(np.mean(above) - np.mean(below))
+                pooled_std = np.std(np.concatenate([above, below])) + 1e-10
+                t_stat = mean_diff / pooled_std
+
+                if t_stat > 1.0:
+                    direction = 1 if np.mean(above) > np.mean(below) else -1
+                    self.create_branch(symbol, feat_idx, threshold, direction)
 
     def get_stats(self) -> dict:
         promoted = [b for b in self.branches.values() if b.status == "PROMOTED"]
@@ -204,9 +223,16 @@ class NeuralCortex:
             "promoted": len(promoted),
             "testing": 0,
             "top_branches": [
-                {"id": b.branch_id, "symbol": b.symbol, "feature": b.feature_name,
-                 "wr": round(b.win_rate, 3), "avg_r": round(b.avg_r, 3),
-                 "sharpe": round(b.sharpe, 2), "trades": b.trades, "status": b.status}
+                {
+                    "id": b.branch_id,
+                    "symbol": b.symbol,
+                    "feature": b.feature_name,
+                    "wr": round(b.win_rate, 3),
+                    "avg_r": round(b.avg_r, 3),
+                    "sharpe": round(b.sharpe, 2),
+                    "trades": b.trades,
+                    "status": b.status,
+                }
                 for b in sorted(promoted, key=lambda x: x.confidence, reverse=True)[:10]
             ],
         }

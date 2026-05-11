@@ -5,6 +5,8 @@ All 5 layers active. No cortex gating. Real orders. Full aggression.
 
 import asyncio
 import time
+import os
+import json
 from config import config
 from logger import get_logger
 from brokers.pepperstone_ctrader_client import CtraderClient
@@ -19,6 +21,9 @@ from aggression.news_scalper import NewsScalper
 from aggression.cross_instrument import CrossInstrumentArb
 
 logger = get_logger("parasite")
+
+# Path for persisting refresh token between restarts
+TOKEN_CACHE_PATH = os.path.join(os.path.dirname(__file__), "..", ".token_cache.json")
 
 
 class ParasiteCore:
@@ -46,14 +51,165 @@ class ParasiteCore:
         self.news_scalper = NewsScalper(self)
         self.cross_instrument = CrossInstrumentArb(self)
 
+    # ═══════════════════════════════════════════════════════════════
+    # AUTH FIX: Proper OAuth2 Authorization Code + Refresh Token Flow
+    # ═══════════════════════════════════════════════════════════════
+
+    def _load_cached_token(self) -> str | None:
+        """Load a previously saved refresh token from disk."""
+        try:
+            if os.path.exists(TOKEN_CACHE_PATH):
+                with open(TOKEN_CACHE_PATH, "r") as f:
+                    data = json.load(f)
+                    token = data.get("refresh_token")
+                    if token:
+                        logger.info("Loaded cached refresh token")
+                        return token
+        except Exception as e:
+            logger.warning(f"Failed to load token cache: {e}")
+        return None
+
+    def _save_cached_token(self, refresh_token: str):
+        """Persist the refresh token to disk for subsequent restarts."""
+        try:
+            cache_dir = os.path.dirname(TOKEN_CACHE_PATH)
+            os.makedirs(cache_dir, exist_ok=True)
+            with open(TOKEN_CACHE_PATH, "w") as f:
+                json.dump({"refresh_token": refresh_token}, f)
+            logger.info("Refresh token cached to disk")
+        except Exception as e:
+            logger.warning(f"Failed to save token cache: {e}")
+
+    def _get_auth_url(self) -> str:
+        """Build the authorization URL for first-time browser login."""
+        base_url = "https://id.ctrader.com/oauth/authorize"
+        params = {
+            "client_id": config.CTRADER_CLIENT_ID,
+            "redirect_uri": "https://127.0.0.1:8000/callback",  # local callback
+            "scope": "accounts offline_access",
+            "response_type": "code",
+            "state": "aurora_parasite",
+        }
+        query = "&".join(f"{k}={v}" for k, v in params.items())
+        return f"{base_url}?{query}"
+
+    async def _exchange_code_for_token(self, auth_code: str) -> dict | None:
+        """Exchange authorization code for access + refresh tokens."""
+        try:
+            token_url = "https://id.ctrader.com/oauth/token"
+            payload = {
+                "grant_type": "authorization_code",
+                "code": auth_code,
+                "redirect_uri": "https://127.0.0.1:8000/callback",
+                "client_id": config.CTRADER_CLIENT_ID,
+                "client_secret": config.CTRADER_CLIENT_SECRET,
+            }
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.post(token_url, data=payload) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        logger.info("Successfully exchanged auth code for tokens")
+                        return data
+                    else:
+                        error_body = await resp.text()
+                        logger.error(f"Token exchange failed: {resp.status} — {error_body}")
+                        return None
+        except Exception as e:
+            logger.error(f"Token exchange exception: {e}")
+            return None
+
+    async def _refresh_access_token(self, refresh_token: str) -> dict | None:
+        """Use refresh token to get a new access token."""
+        try:
+            token_url = "https://id.ctrader.com/oauth/token"
+            payload = {
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": config.CTRADER_CLIENT_ID,
+                "client_secret": config.CTRADER_CLIENT_SECRET,
+            }
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.post(token_url, data=payload) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        logger.info("Successfully refreshed access token")
+                        return data
+                    else:
+                        error_body = await resp.text()
+                        logger.error(f"Token refresh failed: {resp.status} — {error_body}")
+                        return None
+        except Exception as e:
+            logger.error(f"Token refresh exception: {e}")
+            return None
+
+    async def _authenticate(self) -> str | None:
+        """
+        Full OAuth2 flow:
+        1. Try cached refresh token first
+        2. If that fails, require manual browser auth (one-time)
+        3. Return valid access token or None
+        """
+        # --- Step 1: Try cached refresh token ---
+        cached_refresh = self._load_cached_token()
+        if cached_refresh:
+            token_data = await self._refresh_access_token(cached_refresh)
+            if token_data:
+                refresh_token = token_data.get("refresh_token", cached_refresh)
+                self._save_cached_token(refresh_token)
+                return token_data.get("access_token")
+
+        # --- Step 2: First-time auth required ---
+        auth_url = self._get_auth_url()
+        logger.warning("=" * 60)
+        logger.warning("MANUAL AUTHENTICATION REQUIRED (ONE-TIME)")
+        logger.warning("1. Open this URL in a browser:")
+        logger.warning(f"   {auth_url}")
+        logger.warning("2. Log in to your Pepperstone cTrader account")
+        logger.warning("3. After redirect, copy the 'code' parameter from the URL")
+        logger.warning("4. Set it as env var: PEPPERSTONE_AUTH_CODE=<code>")
+        logger.warning("   Then restart the application.")
+        logger.warning("=" * 60)
+
+        # Check if auth code was provided via environment variable
+        auth_code = os.getenv("PEPPERSTONE_AUTH_CODE")
+        if not auth_code:
+            logger.error("No PEPPERSTONE_AUTH_CODE environment variable set")
+            return None
+
+        token_data = await self._exchange_code_for_token(auth_code)
+        if not token_data:
+            return None
+
+        refresh_token = token_data.get("refresh_token")
+        if refresh_token:
+            self._save_cached_token(refresh_token)
+
+        return token_data.get("access_token")
+
+    # ═══════════════════════════════════════════════════════════════
+    # END AUTH FIX
+    # ═══════════════════════════════════════════════════════════════
+
     async def start(self):
         logger.info("🦠 PARASITE AWAKENING — PEPPERSTONE MODE")
         config.validate()
 
+        # --- Authenticate first (new flow) ---
+        access_token = await self._authenticate()
+        if not access_token:
+            raise RuntimeError(
+                "Failed to authenticate with Pepperstone cTrader. "
+                "Set PEPPERSTONE_AUTH_CODE env var after browser login."
+            )
+
+        # --- Connect with access token ---
         connected = await self.broker_client.connect(
             config.CTRADER_CLIENT_ID,
             config.CTRADER_CLIENT_SECRET,
             config.CTRADER_ACCOUNT_ID,
+            access_token=access_token,  # Pass the token
         )
         if not connected:
             raise RuntimeError("Failed to connect to Pepperstone cTrader")

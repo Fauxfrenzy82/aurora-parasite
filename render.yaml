@@ -6,11 +6,11 @@ services:
     startCommand: python main.py
     envVars:
       - key: CTRADER_CLIENT_ID
-        value: 27781_BacBxd2DDdHLJIGQJEnwcsbcX7yv6UhwrBM3mpCcCQWqmMydnH
+        value: put here
       - key: CTRADER_CLIENT_SECRET
-        value: EfdUjsb8xRTrURq1OYkKRC71j7jKg1Le7xSDE0lA2Ml113vkF7
+        value: place here
       - key: CTRADER_ACCOUNT_ID
-        value: "5285874"
+        value: "place here"
       - key: CTRADER_ENV
         value: demo
       - key: INITIAL_CAPITAL
